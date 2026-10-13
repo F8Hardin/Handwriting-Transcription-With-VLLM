@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "handwriting_transcription"
+version = "0.1.0"
+description = "Handwritten image to typed text using vision-capable LLMs (OpenAI-compatible endpoints)"
+requires-python = ">=3.10"
+dependencies = [
+    "requests",
+    "pyyaml",
+    "pillow",
+    "opencv-python-headless",
+    "numpy"
+]
+
+[project.optional-dependencies]
+test = ["jiwer"]    # scoring only: pip install -e ".[test]"
+
+[tool.setuptools]
+packages = ["handwriting_transcription"]
+package-dir = { "handwriting_transcription" = "src" }
+
+[tool.setuptools.package-data]
+handwriting_transcription = ["*.yaml"]

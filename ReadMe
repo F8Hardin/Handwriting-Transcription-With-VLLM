@@ -1,0 +1,96 @@
+## Requirements
+
+- Python 3.10+
+- An OpenAI-compatible vision model endpoint, e.g. [LM Studio](https://lmstudio.ai) with a
+  vision model downloaded (tested: `google/gemma-4-e4b`, `google/gemma-4-12b`)
+
+## Install
+
+```bash
+git clone <repo-url>
+cd Handwriting_Transcription
+python -m venv venv
+source venv/bin/activate            # Windows: venv\Scripts\activate
+pip install -e ".[test]"            # package + jiwer for scoring
+pip install gradio                  # only needed for the demo
+```
+
+## Install as a package (use only)
+
+```bash
+pip install git+https://github.com/<user>/<repo>.git
+```
+
+Then in any Python code:
+
+```python
+from handwriting_transcription import image_to_text, TranscriptionError
+```
+
+## Configure
+
+Edit `src/llm_transcription_config.yaml`:
+
+```yaml
+model:
+    id: google/gemma-4-e4b                              # model to use
+    chat_url: http://localhost:1234/v1/chat/completions # your endpoint
+    temperature: 1.0
+    timeout: 300
+
+preprocess: false    # true = grayscale, contrast, binarize, remove lines
+```
+
+For testing and the demo, edit `src/models.yaml` (models to compare, LM Studio base URL, context length).
+
+## Usage
+
+### As a module
+
+```python
+from handwriting_transcription import image_to_text
+with open("page.png", "rb") as f:
+    result = image_to_text(f.read())                     # uses the config's model
+print(result["choices"][0]["message"]["content"])
+```
+
+Override the model or temperature per call:
+
+```python
+result = image_to_text(image_bytes, "google/gemma-3-12b", 0.2)
+```
+
+Accepts any image format Pillow reads (PNG, JPEG, TIFF...). Raises `TranscriptionError` on request failures.
+
+### Run a test on CVL data
+
+Requires the CVL data (see **Test data**). From the project root:
+
+```bash
+python -m src.test_llm_transcription 10 42      # 10 random pages, seed 42
+```
+
+Results go to `runs/<timestamp>/`: `images/`, `targets/`, `outputs/<model>/`, `seed.txt`, and `scores.csv` (CER/WER per model and image).
+
+### Run the demo
+
+```bash
+python demo.py
+```
+
+Opens a Gradio page on port 7860 with webcam/upload, model selection and temperature. With `share=True` (set in `demo.py`), it also prints a public `*.gradio.live` link.
+
+## Test data (CVL)
+
+The CVL Database is not included (license: CC BY-NC 3.0, non-commercial research only).
+
+1. Download from https://zenodo.org/records/1492267:
+   `cvl-database-1-1.zip` and `cvl-database-cropped-1-1.zip`
+2. Extract both into `data/`:
+
+   data/
+   ├── cvl-database-1-1/          # trainset/ and testset/ with xml ground truth
+   └── cvl-database-cropped-1-1/  # handwriting-only page images
+
+3. Run a test: `python -m src.test_llm_transcription <num_images> <seed>`
+

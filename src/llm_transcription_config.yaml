@@ -1,0 +1,17 @@
+model:
+    id: google/gemma-4-e2b
+    chat_url: http://10.0.0.60:1234/v1/chat/completions
+    temperature: 1.0
+    timeout: 10000
+
+preprocess: true
+
+prompt: |
+    You are a handwriting transcription tool.
+    TASK:
+    - Transcribe ALL handwritten text exactly as written.
+    - Preserve original spelling, grammar, punctuation, and run-on sentences.
+    - Keep line breaks if clear; otherwise return as a single paragraph.
+    - Ignore printed artifacts, UI text, and random numbers (not part of handwriting).
+    - If something is scribbled out or unreadable, write [illegible].
+    - Return ONLY the transcription text. No explanations.

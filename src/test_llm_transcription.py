@@ -1,0 +1,132 @@
+# loops over the transcription.py's submission logic with several images
+# compiles results in runs/<date_startTime>/outputs/ for each model, targets in runs/targets
+# targets generated from CVL_XML_TextExtractor.py
+
+import random
+import requests
+import shutil
+import csv
+import sys
+from datetime import datetime
+from pathlib import Path
+import yaml
+from .CVL_XML_TextExtractor import extract_text
+from .llm_transcription import image_to_text, TranscriptionError
+from .alignment_test import align_score
+
+test_models = Path(__file__).parent / "models.yaml"
+target_path = Path(__file__).parent.parent / "data" / "cvl-database-1-1" / "testset" / "xml"
+image_path = Path(__file__).parent.parent / "data" / "cvl-database-cropped-1-1"
+
+#Setup files
+#create folder for date, images, targets
+runs_path = Path(__file__).parent.parent / "runs" / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+runs_path.mkdir(parents = True, exist_ok = True)
+(runs_path / "images").mkdir(exist_ok = True)
+(runs_path / "targets").mkdir(exist_ok = True)
+
+#get random images, store in images and targets
+image_count = int(sys.argv[1])
+seed = sys.argv[2]
+(runs_path / "seed.txt").write_text(seed)
+target_xml_files = sorted(target_path.glob("*.xml"))
+selected = random.Random(int(seed)).sample(target_xml_files, image_count)
+targets = []
+image_paths = []
+for i, xml in enumerate(selected, start=1):
+    # extract text from xml, save to runs/targets
+    page_id = xml.name.replace("_attributes.xml", "")
+    target = extract_text(xml)
+    targets.append(target)
+    (runs_path / "targets" / f"trgt{i:03d}_{page_id}.txt").write_text(target, encoding="utf-8")
+    # get associated source image, copy to runs/images
+    src_img = image_path / f"{page_id}-cropped.tif"
+    if not src_img.exists():
+        raise FileNotFoundError(f"No cropped image for {page_id}: {src_img}")
+    else:
+        dst_img = runs_path / "images" / f"img{i:03d}_{page_id}.tif"
+        image_paths.append(dst_img)
+        shutil.copy(src_img, dst_img)
+
+with open(test_models) as f:
+    file = yaml.safe_load(f)
+    models = file["models"]
+    context_length = file["context_length"]
+    chat_url = file["chat_url"]
+
+def load_model(model_id: str, context_length: int = 16384) -> None:
+    """Unload any existing copy, then load fresh with the context length we want."""
+    info = requests.get(f"{chat_url}/api/v1/models", timeout=30).json()["models"]
+    for m in info:
+        if m["key"] == model_id:
+            for inst in m["loaded_instances"]:
+                requests.post(f"{chat_url}/api/v1/models/unload",
+                              json={"instance_id": inst["id"]}, timeout=120)
+
+    r = requests.post(f"{chat_url}/api/v1/models/load",
+                      json={"model": model_id, "context_length": context_length,
+                            "echo_load_config": True},
+                      timeout=600)
+    r.raise_for_status()
+    print(f"Loaded {model_id}: {r.json()['load_config']}")
+
+
+def unload_model(model_id: str) -> None:
+    requests.post(f"{chat_url}/api/v1/models/unload", json={"instance_id": model_id}, timeout=120)
+
+def unload_all() -> None:
+    for m in requests.get(f"{chat_url}/api/v1/models", timeout=30).json()["models"]:
+        for inst in m["loaded_instances"]:
+            requests.post(f"{chat_url}/api/v1/models/unload", json={"instance_id": inst["id"]}, timeout=120)
+
+unload_all()
+    
+transcriptions = []
+scores = {}
+for m in models:
+    model_dir = runs_path / "outputs" / m["id"]
+    model_dir.mkdir(exist_ok = True, parents = True)
+    try:
+        load_model(m["id"], context_length = context_length)
+    except requests.RequestException as e:
+        print(f"Could not load {m['id']}, skipping: {e}")
+        (model_dir / "error.txt").write_text(f"load failed: {e}\n", encoding="utf-8")
+        continue
+    current_scores = []
+    for i, img in enumerate(image_paths, start = 1):
+        with open(img, "rb") as image_file:
+            image_bytes = image_file.read()
+        try:
+            transcript = image_to_text(image_bytes, m["id"], m["temperature"])["choices"][0]["message"]["content"]
+            transcriptions.append(transcript)
+            page_id = img.stem.split("_", 1)[1]
+            (model_dir / f"out{i:03d}_{page_id}.txt").write_text(transcript, encoding="utf-8")
+            score = align_score(targets[i - 1], transcript, verbose = False)
+            current_scores.append((img.stem, score))
+            if score["cer"] is None:
+                print(f"Completed image {i}  (blank target, not scored)")
+            else:
+                print(f"Completed image {i}  CER {score['cer']:.1%}  WER {score['wer']:.1%}")
+        except TranscriptionError as e:
+            print(f"Error on model {m['id']}, image {i}: {e}")
+            with open(model_dir / "error.txt", "a", encoding="utf-8") as f:
+                f.write(f"image {i} ({img.name}): {e}\n")
+    unload_model(m["id"]) 
+    scores[m["id"]] = current_scores
+
+scores_file = runs_path / "scores.csv"
+with open(scores_file, "w", newline="", encoding="utf-8") as f:
+    writer = csv.writer(f)
+    writer.writerow(["model", "image", "cer", "wer"])
+    for model_id, results in scores.items():
+        for image_name, s in results:
+            writer.writerow([model_id, image_name, s["cer"], s["wer"]])
+
+#SIMPLE TEST FOR STARTERS
+# from .llm_transcription import image_to_text
+# with open("/mnt/mySSD/SambaShare/Fate's Home Directory/Work/NCTJ/Handwriting_Transcription/data/cvl-database-cropped-1-1/0165-1-cropped.tif", "rb") as image_file:
+#     image_bytes = image_file.read()
+# print("Transcription:", image_to_text(image_bytes, "google/gemma-4-e4b")["choices"][0]["message"]["content"])
+
+# from .CVL_XML_TextExtractor import extract_text
+# print("Ground Truth:", extract_text("/mnt/mySSD/SambaShare/Fate's Home Directory/Work/NCTJ/Handwriting_Transcription/data/cvl-database-1-1/testset/xml/0165-1_attributes.xml"))

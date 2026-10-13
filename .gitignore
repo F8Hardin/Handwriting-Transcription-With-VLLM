@@ -1,0 +1,18 @@
+# data & outputs
+data/
+runs/
+
+# python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+venv/
+
+# jupyter / gradio
+.ipynb_checkpoints/
+.gradio/
+
+# secrets / certs
+.env
+*.pem
