@@ -16,7 +16,7 @@ from src.llm_transcription import image_to_text, TranscriptionError
 from PIL import Image
 
 parser = argparse.ArgumentParser()
-parser.add_argument("models_file", nargs="?", default="models.yaml", help="models yaml in src/ (or a path), e.g. models_gemini.yaml")
+parser.add_argument("models_file", nargs="?", default="models_gemini.yaml", help="models yaml in src/ (or a path), e.g. models_gemini.yaml")
 parser.add_argument("--port", type=int, default=1111)
 args = parser.parse_args()
 MODELS_FILE = Path(args.models_file) if Path(args.models_file).exists() else Path(__file__).parent / "src" / args.models_file
