@@ -14,13 +14,16 @@ import yaml
 from src.llm_transcription import image_to_text, TranscriptionError
 from PIL import Image
 
-MODELS_FILE = Path(__file__).parent / "src" / "models.yaml"
+MODELS_FILE = Path(os.environ.get("MODELS_FILE", Path(__file__).parent / "src" / "models.yaml"))
 with open(MODELS_FILE) as f:
     cfg = yaml.safe_load(f)
 
 MODELS = {m["id"]: m["temperature"] for m in cfg["models"]}
 CONTEXT_LENGTH = cfg["context_length"]
 LMSTUDIO = cfg["chat_url"]
+BACKEND = cfg.get("backend", "openai")
+API_KEY = os.environ.get(cfg.get("api_key_env") or "")
+USE_LMSTUDIO = BACKEND == "openai" and not API_KEY    # load/unload/status only for a local LM Studio
 
 ## error logging ##
 logging.basicConfig(filename="demo_errors.log", level=logging.WARNING, format="%(asctime)s %(levelname)s %(message)s")
@@ -34,7 +37,20 @@ def friendly(e: Exception) -> str:
     msg = e.user_msg if isinstance(e, TranscriptionError) else "Unexpected error. Please contact the administrator."
     return f"{msg} (ref {ref})"
 
-# (copied here from test_llm_transcription: importing that file runs the whole test)
+## model loading and checking ##
+def gemini_models() -> dict[str, float]:
+    r = requests.get(f"{cfg['chat_url'].rstrip('/')}?pageSize=1000", headers={"x-goog-api-key": os.environ[cfg["api_key_env"]]}, timeout=15)
+    r.raise_for_status()
+    skip = ("tts", "image", "live", "embedding", "veo", "lyria", "robotics")
+    ids = [m["name"].removeprefix("models/") for m in r.json()["models"] if "generateContent" in m.get("supportedGenerationMethods", [])]
+    return {i: 1.0 for i in sorted(ids) if not any(s in i for s in skip)}
+
+if BACKEND == "gemini":
+    try:
+        MODELS = gemini_models()
+    except (requests.RequestException, KeyError, ValueError) as e:
+        log.error("ListModels failed, using models file: %r", e)
+
 def unload_all() -> None:
     for m in requests.get(f"{LMSTUDIO}/api/v1/models", timeout=30).json()["models"]:
         for inst in m["loaded_instances"]:
@@ -54,6 +70,8 @@ def load_model(model_id: str) -> str:
 
 def current_status() -> str:
     """Report what LM Studio has loaded right now (no loading, just a check)."""
+    if not USE_LMSTUDIO:
+        return ""
     try:
         for m in requests.get(f"{LMSTUDIO}/api/v1/models", timeout=10).json()["models"]:
             for inst in m["loaded_instances"]:
@@ -66,6 +84,8 @@ def current_status() -> str:
 # ---- Gradio callbacks ----
 def on_model_change(model_id):
     """Load the selected model and reset temperature to its models.yaml value."""
+    if not USE_LMSTUDIO:
+        return f"Using **{model_id}**", MODELS[model_id]
     try:
         status = load_model(model_id)
     except requests.RequestException as e:
@@ -225,11 +245,11 @@ with gr.Blocks(title="Handwriting Transcription") as demo:
             model = gr.Dropdown(list(MODELS), value=first_model, label="Model")
             temperature = gr.Number(value=MODELS[first_model], label="Temperature", minimum=0, maximum=2, step=0.1)
         status = gr.Markdown()
-        model.change(lambda m: (MODELS[m], f"Loading **{m}**..."), inputs=model, outputs=[temperature, status]).then(on_model_change, inputs=model, outputs=[status, temperature])
+        model.change(lambda m: (MODELS[m], (f"Loading **{m}**..." if USE_LMSTUDIO else f"Using **{m}**")), inputs=model, outputs=[temperature, status]).then(on_model_change, inputs=model, outputs=[status, temperature])
     with gr.Column():
-        build_section("text", "Vision LLM Handwriting Transcription Demo", "llm_transcription_config.yaml", False, "Transcription", model, temperature)
+        build_section("text", "Vision LLM Handwriting Transcription Demo", cfg["transcription_config"], False, "Transcription", model, temperature)
     with gr.Column():
-        build_section("form", "Vision LLM Form Transcription Demo", "llm_forms_config.yaml", True, "Form JSON", model, temperature)
+        build_section("form", "Vision LLM Form Transcription Demo", cfg["forms_config"], True, "Form JSON", model, temperature)
     demo.load(current_status, outputs=status)
 
 if __name__ == "__main__":

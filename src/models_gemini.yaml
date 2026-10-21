@@ -17,3 +17,5 @@ forms_config: llm_forms_config_gemini.yaml
 transcription_config: llm_transcription_config_gemini.yaml
 
 backend: gemini
+
+api_key_env: GEMINI_API_KEY
