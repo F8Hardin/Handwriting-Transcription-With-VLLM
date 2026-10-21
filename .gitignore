@@ -16,3 +16,8 @@ venv/
 # secrets / certs
 .env
 *.pem
+
+# demo logs and local test images
+demo_errors.log
+test_badwriting/
+test_forms/
