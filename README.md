@@ -113,8 +113,8 @@ python demo.py
 
 Opens a Gradio page on port **7860** with webcam/upload, model selection and temperature. With `share=True` (set in `demo.py`) it also prints a temporary public `*.gradio.live` link.
 
-## Test data (CVL)
-
+## Test data
+### CVL - Handwriting
 The CVL Database is **not included** — it is licensed for non-commercial research only ([CC BY-NC 3.0](https://creativecommons.org/licenses/by-nc/3.0/)).
 
 1. Download `cvl-database-1-1.zip` and `cvl-database-cropped-1-1.zip` from [Zenodo](https://zenodo.org/records/1492267).
@@ -126,11 +126,39 @@ The CVL Database is **not included** — it is licensed for non-commercial resea
    └── cvl-database-cropped-1-1/  # handwriting-only page images
    ```
 
-3. Run a benchmark: `python -m src.test_llm_transcription <num_images> <seed>`
+3. Run a benchmark: `python -m src.test_llm_transcription <num_images> <seed> CVL`
 
 If you use the CVL data, please cite:
 
 > F. Kleber, S. Fiel, M. Diem and R. Sablatnig, *CVL-Database: An Off-line Database for Writer Retrieval, Writer Identification and Word Spotting*, ICDAR 2013, pp. 560–564.
+
+### SMHD - Handwriting
+The SMHD Database is **not included**. ([Find it here](https://research-repository.rmit.edu.au/articles/dataset/_b_Student_Messy_Handwritten_Dataset_SMHD_b_/24312715)).
+
+1. Download the SMHD-forms zip file from the webpade.
+
+2. Extract into `data/`:
+
+   ```
+   data/
+   ├── SMHD-forms/SMHD-forms/
+   ```
+
+3. Run a benchmark: `python -m src.test_llm_transcription <num_images> <seed> SMHD`
+
+### FUNSD
+The FUNSD Database is **not included**. ([Find it here](https://guillaumejaume.github.io/FUNSD/download/)).
+
+1. Download the FUNSD zip file from the webpade.
+
+2. Extract into `data/`:
+
+   ```
+   data/
+   ├── funsd/
+   ```
+
+3. Run a benchmark: `python -m src.test_llm_transcription <num_images> <seed> funsd`
 
 ## Project structure
 
