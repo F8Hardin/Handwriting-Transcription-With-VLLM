@@ -103,6 +103,8 @@ def image_to_text(image_bytes: bytes, model_id_override: str | None = None, temp
             detail = response.text[:500]
         code = response.status_code
         msg = f"{model_id}: HTTP {code}: {detail}"
+        if "context size" in str(detail).lower():    # LM Studio reports this as HTTP 400
+            raise ServiceError(msg, "The model's context size was exceeded. Please contact the administrator.")
         if code == 429:
             raise ServiceError(msg, "The service is busy. Wait a moment and try again.")
         if code in (401, 403, 404):
