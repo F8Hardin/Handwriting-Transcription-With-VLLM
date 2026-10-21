@@ -1,0 +1,21 @@
+model:
+    id: gemma-4-31b-it
+    chat_url: https://generativelanguage.googleapis.com/v1beta/models
+    temperature: 1.0
+    timeout: 10000
+
+api_key_env: GEMINI_API_KEY
+
+backend: gemini
+
+preprocess: True
+
+prompt: |
+    You are a handwriting transcription tool.
+    TASK:
+    - Transcribe ALL handwritten text exactly as written.
+    - Preserve original spelling, grammar, punctuation, and run-on sentences.
+    - Keep line breaks if clear; otherwise return as a single paragraph.
+    - Ignore printed artifacts, UI text, and random numbers (not part of handwriting).
+    - If something is scribbled out or unreadable, write [illegible].
+    - Return ONLY the transcription text. No explanations.

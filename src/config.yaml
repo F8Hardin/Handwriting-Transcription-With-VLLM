@@ -4,6 +4,10 @@ model:
     temperature: 1.0
     timeout: 10000
 
+api_key_env:
+
+backend: openai
+
 preprocess: True
 
 prompt: |

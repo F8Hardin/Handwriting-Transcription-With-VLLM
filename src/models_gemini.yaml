@@ -1,0 +1,19 @@
+models:
+  - id: gemma-4-31b-it
+    temperature: 1.0
+  - id: gemma-4-26b-a4b-it
+    temperature: 1.0
+  - id: gemini-3.8-flash
+    temperature: 1.0
+  - id: gemini-3.5-flash
+    temperature: 1.0
+
+context_length: 32000
+
+chat_url: https://generativelanguage.googleapis.com/v1beta/models
+
+forms_config: llm_forms_config_gemini.yaml
+
+transcription_config: llm_transcription_config_gemini.yaml
+
+backend: gemini

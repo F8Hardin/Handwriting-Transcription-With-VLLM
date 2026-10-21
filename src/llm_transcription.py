@@ -1,5 +1,6 @@
 from .preprocessing import preprocess
 from pathlib import Path
+import os
 import yaml
 import requests
 import base64
@@ -40,7 +41,13 @@ def image_to_text(image_bytes: bytes, model_id_override: str | None = None, temp
             prompt = config['prompt']
             model_id = model_id_override or config['model']['id']
             model_temp = config['model']['temperature'] if temperature_override is None else temperature_override
+            backend = config.get('backend') or 'openai'
+            if backend not in ('openai', 'gemini'):
+                raise ValueError(f"backend must be 'openai' or 'gemini', got {backend!r}")
+            key_env = config.get('api_key_env')
             model_url = config['model']['chat_url']
+            if backend == 'gemini':
+                model_url = f"{model_url.rstrip('/')}/{model_id}:generateContent"
             model_timeout = config['model']['timeout']
     except Exception as e:
         raise ConfigError(f"{config_name}: {e!r}") from e
@@ -61,36 +68,44 @@ def image_to_text(image_bytes: bytes, model_id_override: str | None = None, temp
       raise ImageError(f"image decode/preprocess failed: {e!r}") from e
 
     #api request to some openAI endpoint
-    payload = {
-        "model": model_id,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text", 
-                        "text": prompt
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/png;base64,{img}"
-                        }
-                    }
-                ]
-            }
-        ],
-        "temperature": model_temp
-    }
-
-    headers = {
-        "Content-Type": "application/json"
-    }
+    key_env = key_env or None
+    api_key = os.environ.get(key_env) if key_env else None
+    if key_env and not api_key:
+        raise ConfigError(f"{config_name}: env var {key_env} is not set")
+    if backend == "gemini" and not api_key:
+        raise ConfigError(f"{config_name}: gemini backend needs api_key_env set to an env var holding the key")
+    headers = {"Content-Type": "application/json"}
+    if backend == "gemini":
+        headers["x-goog-api-key"] = api_key
+        payload = {
+            "contents": [{"parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": "image/png", "data": img}}
+            ]}],
+            "generationConfig": {"temperature": model_temp}
+        }
+    else:
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        payload = {
+            "model": model_id,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img}"}}
+                    ]
+                }
+            ],
+            "temperature": model_temp
+        }
 
     print("Sending image for transcription...")
     try:
         response = requests.post(model_url, json = payload, headers = headers, timeout = model_timeout)
         print("Transcription completed.")
+        
     except requests.Timeout as e:
         raise ConnectionFailure(f"{model_id}: timed out after {model_timeout}s", "The model took too long to respond. Try again or pick a smaller model.") from e
     except requests.RequestException as e:
@@ -107,6 +122,8 @@ def image_to_text(image_bytes: bytes, model_id_override: str | None = None, temp
             raise ServiceError(msg, "The model's context size was exceeded. Please contact the administrator.")
         if code == 429:
             raise ServiceError(msg, "The service is busy. Wait a moment and try again.")
+        if code == 400 and "api key not valid" in str(detail).lower():
+            raise ConfigError(msg)
         if code in (401, 403, 404):
             raise ConfigError(msg)
         if code == 400:
@@ -115,6 +132,20 @@ def image_to_text(image_bytes: bytes, model_id_override: str | None = None, temp
 
     try:
         data = response.json()
+        if backend == "gemini":
+            block = (data.get("promptFeedback") or {}).get("blockReason")
+            if block:
+                raise ImageError(f"{model_id}: prompt blocked ({block})", "The image was blocked by Google's safety filter. Try a different image.")
+            candidates = data.get("candidates") or []
+            if not candidates:
+                raise ServiceError(f"{model_id}: no candidates in response: {response.text[:300]}")
+            cand = candidates[0]
+            if cand.get("finishReason") == "SAFETY":
+                raise ImageError(f"{model_id}: response blocked (finishReason SAFETY)", "The response was blocked by Google's safety filter. Try a different image.")
+            parts = (cand.get("content") or {}).get("parts") or []
+            gemini_text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
+            data = {"choices": [{"message": {"content": gemini_text},
+                                 "finish_reason": "length" if cand.get("finishReason") == "MAX_TOKENS" else "stop"}]}
         choice = data["choices"][0]
         text = choice["message"]["content"] or ""
     except (ValueError, KeyError, IndexError, TypeError) as e:
