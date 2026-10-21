@@ -10,50 +10,85 @@ import sys
 from datetime import datetime
 from pathlib import Path
 import yaml
-from .CVL_XML_TextExtractor import extract_text
+from .TextExtractor import extract_text_cvl, extract_text_smhd
 from .llm_transcription import image_to_text, TranscriptionError
-from .alignment_test import align_score
+from .alignment_test import align_score, json_align_score
 
-test_models = Path(__file__).parent / "models.yaml"
-target_path = Path(__file__).parent.parent / "data" / "cvl-database-1-1" / "testset" / "xml"
-image_path = Path(__file__).parent.parent / "data" / "cvl-database-cropped-1-1"
-
-#Setup files
-#create folder for date, images, targets
-runs_path = Path(__file__).parent.parent / "runs" / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-runs_path.mkdir(parents = True, exist_ok = True)
-(runs_path / "images").mkdir(exist_ok = True)
-(runs_path / "targets").mkdir(exist_ok = True)
-
-#get random images, store in images and targets
 image_count = int(sys.argv[1])
 seed = sys.argv[2]
-(runs_path / "seed.txt").write_text(seed)
-target_xml_files = sorted(target_path.glob("*.xml"))
-selected = random.Random(int(seed)).sample(target_xml_files, image_count)
-targets = []
-image_paths = []
-for i, xml in enumerate(selected, start=1):
-    # extract text from xml, save to runs/targets
-    page_id = xml.name.replace("_attributes.xml", "")
-    target = extract_text(xml)
-    targets.append(target)
-    (runs_path / "targets" / f"trgt{i:03d}_{page_id}.txt").write_text(target, encoding="utf-8")
-    # get associated source image, copy to runs/images
-    src_img = image_path / f"{page_id}-cropped.tif"
-    if not src_img.exists():
-        raise FileNotFoundError(f"No cropped image for {page_id}: {src_img}")
-    else:
-        dst_img = runs_path / "images" / f"img{i:03d}_{page_id}.tif"
-        image_paths.append(dst_img)
-        shutil.copy(src_img, dst_img)
+dataset = sys.argv[3].lower() if len(sys.argv) > 3 else "none"
 
+test_models = Path(__file__).parent / "models.yaml"
 with open(test_models) as f:
     file = yaml.safe_load(f)
     models = file["models"]
     context_length = file["context_length"]
     chat_url = file["chat_url"]
 
+## Setup files ##
+runs_path = Path(__file__).parent.parent / "runs" / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+runs_path.mkdir(parents = True, exist_ok = True)
+(runs_path / "images").mkdir(exist_ok = True)
+(runs_path / "targets").mkdir(exist_ok = True)
+(runs_path / "seed.txt").write_text(seed)
+
+## setup data for testing ##
+textTargets = True
+if dataset == "cvl":
+    target_path = Path(__file__).parent.parent / "data" / "cvl-database-1-1" / "testset" / "xml"
+    image_path = Path(__file__).parent.parent / "data" / "cvl-database-cropped-1-1"
+    target_format_files = sorted(target_path.glob("*.xml"))
+    nameRemoval = "_attributes.xml" #what to remove from file name to get an id number for targets
+    data_extract_text = extract_text_cvl
+    image_file_type = ".tif"
+    image_extension = "-cropped" + image_file_type #what to remove from image file name to get id number
+    print("Testing handwriting with CVL.")
+elif dataset == "smhd":
+    target_path = Path(__file__).parent.parent / "data" / "SMHD-forms" / "SMHD-forms" / "ALL" 
+    image_path = Path(__file__).parent.parent / "data" / "SMHD-forms" / "SMHD-forms" / "ALL"
+    target_format_files = sorted(target_path.glob("*.txt"))
+    nameRemoval = ".txt"
+    data_extract_text = extract_text_smhd
+    image_file_type = ".jpg"
+    image_extension = "" + image_file_type
+    print("Testing handwriting with SMHD.")
+elif dataset == "funsd":
+    textTargets = False
+    target_path = Path(__file__).parent.parent / "data" / "funsd" / "dataset" / "testing_data" / "annotations"
+    image_path = Path(__file__).parent.parent / "data" / "funsd" / "dataset" / "testing_data" / "images"
+    target_format_files = sorted(target_path.glob("*.json"))
+    nameRemoval = ".json"
+    data_extract_text = None
+    image_file_type = ".png"
+    image_extension = "" + image_file_type
+    print("Testing Forms with FUNSD")
+else:
+    print("ERROR: Missing data string as arguement 3. Possible options: cvl, smhd, funsd")
+    sys.exit(0)
+
+#get random images, store in images and targets
+targets = [] #list of strings
+image_paths = [] #list of image paths
+
+selected = random.Random(int(seed)).sample(target_format_files, image_count)
+for i, file in enumerate(selected, start=1):
+    # extract text from xml, save to runs/targets
+    page_id = file.name.replace(nameRemoval, "")
+    if textTargets:
+        target = data_extract_text(file)
+        targets.append(target)
+        (runs_path / "targets" / f"trgt{i:03d}_{page_id}.txt").write_text(target, encoding="utf-8")
+    # get associated source image, copy to runs/images
+    src_img = image_path / f"{page_id}{image_extension}"
+    if not src_img.exists():
+        raise FileNotFoundError(f"No cropped image for {page_id}: {src_img}")
+    else:
+        dst_img = runs_path / "images" / f"img{i:03d}_{page_id}{image_file_type}"
+        image_paths.append(dst_img)
+        shutil.copy(src_img, dst_img)
+
+
+## model loading and unloading ##
 def load_model(model_id: str, context_length: int = 16384) -> None:
     """Unload any existing copy, then load fresh with the context length we want."""
     info = requests.get(f"{chat_url}/api/v1/models", timeout=30).json()["models"]
@@ -79,8 +114,8 @@ def unload_all() -> None:
         for inst in m["loaded_instances"]:
             requests.post(f"{chat_url}/api/v1/models/unload", json={"instance_id": inst["id"]}, timeout=120)
 
+## main logic ##
 unload_all()
-    
 transcriptions = []
 scores = {}
 for m in models:
@@ -101,12 +136,16 @@ for m in models:
             transcriptions.append(transcript)
             page_id = img.stem.split("_", 1)[1]
             (model_dir / f"out{i:03d}_{page_id}.txt").write_text(transcript, encoding="utf-8")
-            score = align_score(targets[i - 1], transcript, verbose = False)
-            current_scores.append((img.stem, score))
-            if score["cer"] is None:
-                print(f"Completed image {i}  (blank target, not scored)")
+            if textTargets:
+                score = align_score(targets[i - 1], transcript, verbose = False)
             else:
-                print(f"Completed image {i}  CER {score['cer']:.1%}  WER {score['wer']:.1%}")
+                score = json_align_score(transcript)
+            current_scores.append((img.stem, score))
+            if textTargets:
+                if score["cer"] is None:
+                    print(f"Completed image {i}  (blank target, not scored)")
+                else:
+                    print(f"Completed image {i}  CER {score['cer']:.1%}  WER {score['wer']:.1%}")
         except TranscriptionError as e:
             print(f"Error on model {m['id']}, image {i}: {e}")
             with open(model_dir / "error.txt", "a", encoding="utf-8") as f:
@@ -117,16 +156,13 @@ for m in models:
 scores_file = runs_path / "scores.csv"
 with open(scores_file, "w", newline="", encoding="utf-8") as f:
     writer = csv.writer(f)
-    writer.writerow(["model", "image", "cer", "wer"])
-    for model_id, results in scores.items():
-        for image_name, s in results:
-            writer.writerow([model_id, image_name, s["cer"], s["wer"]])
-
-#SIMPLE TEST FOR STARTERS
-# from .llm_transcription import image_to_text
-# with open("/mnt/mySSD/SambaShare/Fate's Home Directory/Work/NCTJ/Handwriting_Transcription/data/cvl-database-cropped-1-1/0165-1-cropped.tif", "rb") as image_file:
-#     image_bytes = image_file.read()
-# print("Transcription:", image_to_text(image_bytes, "google/gemma-4-e4b")["choices"][0]["message"]["content"])
-
-# from .CVL_XML_TextExtractor import extract_text
-# print("Ground Truth:", extract_text("/mnt/mySSD/SambaShare/Fate's Home Directory/Work/NCTJ/Handwriting_Transcription/data/cvl-database-1-1/testset/xml/0165-1_attributes.xml"))
+    if textTargets:
+        writer.writerow(["model", "image", "cer", "wer"])
+        for model_id, results in scores.items():
+            for image_name, s in results:
+                writer.writerow([model_id, image_name, s["cer"], s["wer"]])
+    else:
+        writer.writerow(["model", "image", "json_format_error"])
+        for model_id, results in scores.items():
+            for image_name, error_code in results:
+                writer.writerow([model_id, image_name, error_code])

@@ -4,6 +4,7 @@
 
 import re
 import jiwer
+import json
 
 def normalize(text: str) -> str:
     # Make output comparable to CVL targets (words only, no punctuation).
@@ -31,3 +32,11 @@ def align_score(target: str, prediction: str, verbose: bool = False) -> dict:
         print(f"CER {result['cer']:.1%}  WER {result['wer']:.1%}")
         print(alignment)
     return result
+
+def json_align_score(json_string: str):
+    try:
+        data = json.loads(json_string)
+        isValidJson =  isinstance(data, dict) and "handwritten_section" in data and "typed_section" in data
+        return 0 if isValidJson else 1 #0 if passes, 1 if json but not expected format
+    except:
+        return 2 #fails to even load as json
