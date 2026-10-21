@@ -122,8 +122,14 @@ def image_to_text(image_bytes: bytes, model_id_override: str | None = None, temp
             raise ServiceError(msg, "The model's context size was exceeded. Please contact the administrator.")
         if code == 429:
             raise ServiceError(msg, "The service is busy. Wait a moment and try again.")
+        if code == 503:
+            raise ServiceError(msg, "The model is busy right now. Try again in a minute, or pick a different model.")
+        if code == 500:
+            raise ServiceError(msg, "The model hit an internal error. Try again, or pick a different model.")
         if code == 400 and "api key not valid" in str(detail).lower():
             raise ConfigError(msg)
+        if code == 400 and "modality" in str(detail).lower():    # e.g. "Image input modality is not enabled for models/..."
+            raise ConfigError(msg, "This model doesn't accept images. Pick a vision-capable model, or contact the administrator.")
         if code in (401, 403, 404):
             raise ConfigError(msg)
         if code == 400:

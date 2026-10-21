@@ -1,4 +1,5 @@
 import io
+import argparse
 import os
 import re
 import html
@@ -47,7 +48,7 @@ def gemini_models() -> dict[str, float]:
     r.raise_for_status()
     skip = ("tts", "image", "live", "embedding", "veo", "lyria", "robotics")
     ids = [m["name"].removeprefix("models/") for m in r.json()["models"] if "generateContent" in m.get("supportedGenerationMethods", [])]
-    return {i: 1.0 for i in sorted(ids) if not any(s in i for s in skip)}
+    return {i: 1.0 for i in sorted(ids) if i.startswith(("gemini-", "gemma-")) and not any(s in i for s in skip)}
 
 if BACKEND == "gemini":
     try:
@@ -258,4 +259,4 @@ with gr.Blocks(title="Handwriting Transcription") as demo:
 
 if __name__ == "__main__":
     print(on_model_change(first_model)[0])
-    demo.launch(server_name="0.0.0.0", server_port=1111, share=True, head=UPLOAD_JS)
+    demo.launch(server_name="0.0.0.0", server_port=args.port, head=UPLOAD_JS, share=True)

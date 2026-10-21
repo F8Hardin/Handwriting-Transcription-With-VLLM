@@ -1,3 +1,13 @@
+---
+title: Handwriting Transcription
+colorFrom: blue
+colorTo: gray
+sdk: gradio
+sdk_version: 6.30.0
+app_file: app.py
+pinned: false
+---
+
 # Handwriting Transcription with Vision LLMs
 
 Turn images of handwritten text into typed text using vision-capable language models served through any **OpenAI-compatible** endpoint ([LM Studio](https://lmstudio.ai), vLLM, or Amazon Bedrock).
