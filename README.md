@@ -6,10 +6,10 @@ Built for the **Nashville Civic Tech Jam**, where the goal is to cut down manual
 
 **Features**
 
-- 📄 `image_to_text()` — image bytes in, transcription out (PNG, JPEG, TIFF, and anything else Pillow reads)
-- 🔧 Optional preprocessing — grayscale, contrast normalization, binarization, horizontal line removal
-- 📊 Benchmark harness — run several models on the [CVL handwriting database](https://cvl.tuwien.ac.at/research/cvl-databases/an-off-line-database-for-writer-retrieval-writer-identification-and-word-spotting/) and score character / word error rate (CER / WER)
-- 🎥 Gradio demo — webcam or upload, pick a model, transcribe live
+- `image_to_text()` — image bytes in, transcription out (PNG, JPEG, TIFF, and anything else Pillow reads)
+- Optional preprocessing — grayscale, contrast normalization, binarization, horizontal line removal
+- Benchmark harness — run several models on the [CVL handwriting database](https://cvl.tuwien.ac.at/research/cvl-databases/an-off-line-database-for-writer-retrieval-writer-identification-and-word-spotting/) and score character / word error rate (CER / WER)
+- Gradio demo — webcam or upload, pick a model, transcribe live
 
 ---
 
