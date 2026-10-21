@@ -1,6 +1,6 @@
 model:
     id: google/gemma-4-12b
-    chat_url: http://10.0.0.60:1234/v1/chat/completions
+    chat_url: http://localhost:1234/v1/chat/completions
     temperature: 1.0
     timeout: 10000
 
