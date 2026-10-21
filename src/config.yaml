@@ -1,0 +1,28 @@
+model:
+    id: google/gemma-4-12b
+    chat_url: http://10.0.0.60:1234/v1/chat/completions
+    temperature: 1.0
+    timeout: 10000
+
+preprocess: True
+
+prompt: |
+    Return ONLY valid JSON. Extract data from the document and sort fields into the appropriate keys and values using this exact JSON schema:
+    
+    {
+      "handwritten_section": {
+        "key": "value",
+        "key": "value"
+      },
+      "typed_section": {
+        "key": "value",
+        "key": "value"
+      }
+    }
+    
+    Rules:
+    1. Copy text exactly as written, preserving original capitalization and punctuation.
+    2. If a field is blank, use null as the value.
+    3. Checkboxes must be mapped to true or false booleans (not strings).
+    4. Do NOT add extra keys outside of the provided schema.
+    5. Output MUST be raw JSON only. Do not include markdown formatting (like ```json), explanations, or conversational commentary.
