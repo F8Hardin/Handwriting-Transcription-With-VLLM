@@ -29,5 +29,7 @@ prompt: |
     2. If a field is blank, use null as the value.
     3. Checkboxes must be mapped to true or false booleans (not strings).
     4. Do NOT add extra keys outside of the provided schema.
-    5. Output MUST be raw JSON only. Do not include markdown formatting (like ```json), explanations, or conversational commentary.
+    5. If text is redacted with a black box, write [redacted]
+    6. If something is scribbled out or unreadable, write [illegible].
+    7. Output MUST be raw JSON only. Do not include markdown formatting (like ```json), explanations, or conversational commentary.
  
