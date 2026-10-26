@@ -17,3 +17,9 @@ chat_url:
 forms_config: llm_forms_config.yaml
 
 transcription_config: llm_transcription_config.yaml
+
+backend: openai
+
+ofs_targets: 
+
+ofs_images: 

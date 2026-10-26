@@ -81,6 +81,10 @@ model:
     temperature: 1.0
     timeout: 300                                          # seconds
 
+backend: openai
+
+api_key_env: OPENAI_KEY_EXAMPLE
+
 preprocess: false    # true = grayscale, contrast, binarize, remove lines
 
 prompt: |
@@ -90,6 +94,7 @@ prompt: |
 ```
 
 **`src/models.yaml`** — models compared by the benchmark and listed in the demo (each with its default temperature), plus the LM Studio base URL and context length used when loading them.
+**`src/models_gemini.yaml`** - yaml file setup for use with gemini/Google AI studio. Google does not ship models with MCP by default, requiring `backend: gemini` in the configuration yaml.
 
 > [!NOTE]
 > Thinking models (Gemma 4 12B, Qwen 3.5) can spend thousands of tokens reasoning before answering. Load them with at least **16k context** or responses may come back empty.
@@ -213,6 +218,17 @@ The FUNSD Database is **not included**. ([Find it here](https://guillaumejaume.g
    ```
 
 3. Run a benchmark: `python -m src.test_llm_transcription <num_images> <seed> funsd`
+
+### OFS - Forms
+Setup has been done to train with sensitive documents. DO NOT test sensitive documents using google's hosted gemini/google AI studio as it may be used for training.
+
+1. Paths to sensitive data images and targets are stored in the models.yaml file for the test_llm_transcription script.
+    ```
+    ofs_targets: <file_path>
+    ofs_images: <file_path>
+    ```
+2. It is recommended to provide an output path (argument 4) to ensure the runs are stored on the same device the sensitive information is read from.
+3. Run a benchmark: `python -m src.test_llm_transcription <num_images> <seed> ofs <run path>`
 
 ## Project structure
 
