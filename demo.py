@@ -292,7 +292,22 @@ def scores_table(selected: list[str] | None, scores: dict[str, list[float | None
 
 first_model = next(iter(MODELS))
 
+html_banner = """
+<div style="padding: 15px; text-align: center; border-radius: 8px;">             
+    <h1 style="margin: 0; font-size: 24px;">VLLM Form and Transcription Testing</h1>
+"""
+
+if BACKEND.lower() == "gemini":
+    html_banner += """
+    <div style="background-color: #FFFF00; color: black; margin-top: 10px; padding: 8px; border-radius: 4px; font-weight: bold;">
+        WARNING: Do not share sensitive documents. Backend is gemini with a free api, meaning the data could be used for model training.
+    </div>
+    """
+
 with gr.Blocks(title="Handwriting Transcription") as demo:
+
+    gr.HTML(html_banner)
+    
     with gr.Column():
         gr.Markdown("# Model Setup")
         with gr.Row():
