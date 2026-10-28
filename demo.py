@@ -148,16 +148,6 @@ def run_multipass(img: Image.Image, model_id, temperature, config: str, as_json:
     return (f"Pass 2 changed {changed:.1%} of the text from pass 1.\n\n"
             f"--- Pass 2 (review, final output) ---\n{second}\n\n--- Pass 1 (first read) ---\n{first}"), ok
 
-def make_single_handler(config: str, as_json: bool):
-    def handler(img, model_id, temperature):
-        if img is None:
-            raise gr.Error("Capture or upload an image first.")
-        try:
-            return run_one(img, model_id, temperature, config, as_json)[0]
-        except Exception as e:
-            raise gr.Error(friendly(e))
-    return handler
-
 JOBS = {}
 JOBS_LOCK = threading.Lock()
 
@@ -232,26 +222,46 @@ def status_html(key: str) -> str:
     # unique data-n every call, otherwise Gradio sees an identical value and won't re-render (message would never clear)
     return f'<div id="{key}-upload-status" data-n="{uuid.uuid4().hex}"></div>'
 
-def build_section(key: str, title: str, config: str, as_json: bool, out_label: str, model, temperature):
-    gr.Markdown(f"# {title}")
-    gr.Markdown("Capture a photo or upload one or more images.")
+def camera() -> gr.Image:
+    return gr.Image(type="pil", sources=["webcam", "upload"], label="Camera / single image", height=400,
+                    webcam_options=gr.WebcamOptions(mirror=False,
+                        constraints={"video": {"width": {"ideal": 1920}, "height": {"ideal": 1080}, "frameRate": {"ideal": 30}}}))
+
+TASKS = {"Transcription": (cfg["transcription_config"], False), "Form": (cfg["forms_config"], True)}    # task -> (config, as_json)
+STANDARD_BATCH = {task: make_batch_handler(f"single-{task}", c, j) for task, (c, j) in TASKS.items()}
+
+def standard_single(img, model_id, temperature, task):
+    if img is None:
+        raise gr.Error("Capture or upload an image first.")
+    config, as_json = TASKS[task]
+    try:
+        return run_one(img, model_id, temperature, config, as_json)[0]
+    except Exception as e:
+        raise gr.Error(friendly(e))
+
+def standard_batch(img_files, model_id, temperature, task, request: gr.Request):
+    yield from STANDARD_BATCH[task](img_files, model_id, temperature, request)
+
+def build_section(model, temperature):
+    key = "single"
+    gr.Markdown("# Vision LLM Handwriting & Form Transcription Demo")
+    gr.Markdown("Pick a task, then capture a photo or upload one or more images. "
+                "Transcription returns plain text; Form returns JSON with handwritten and typed sections.")
+    task = gr.Radio(list(TASKS), value="Transcription", label="Task")
     with gr.Row(equal_height=True):
         with gr.Column(scale=1, min_width=400):
-            image = gr.Image(type="pil", sources=["webcam", "upload"], label="Camera / single image", height=400,
-                             webcam_options=gr.WebcamOptions(mirror=False,
-                                 constraints={"video": {"width": {"ideal": 1920}, "height": {"ideal": 1080}, "frameRate": {"ideal": 30}}}))
+            image = camera()
             button = gr.Button("Transcribe", variant="primary")
         with gr.Column(scale=1, min_width=400):
-            output = gr.Textbox(label=out_label, lines=16)
+            output = gr.Textbox(label="Output (text or form JSON)", lines=16)
     image.upload(lambda im: im, inputs=image, outputs=image)
-    button.click(make_single_handler(config, as_json), inputs=[image, model, temperature], outputs=output, show_progress="minimal")
+    button.click(standard_single, inputs=[image, model, temperature, task], outputs=output, show_progress="minimal")
     upload = gr.UploadButton("Upload files (single or multiple)", file_types=["image"], file_count="multiple", elem_id=f"{key}-upload")
     upload_status = gr.HTML(status_html(key))
     results = gr.HTML()
     upload.upload(lambda: status_html(key), outputs=upload_status) \
-          .then(make_batch_handler(key, config, as_json), inputs=[upload, model, temperature], outputs=results, concurrency_limit=None, trigger_mode="multiple")
+          .then(standard_batch, inputs=[upload, model, temperature, task], outputs=results, concurrency_limit=None, trigger_mode="multiple")
 
-TASKS = {"Transcription": (cfg["transcription_config"], False), "Form": (cfg["forms_config"], True)}    # multipass task -> (config, as_json)
 MULTIPASS_BATCH = {task: make_batch_handler(f"multipass-{task}", c, j, run_multipass) for task, (c, j) in TASKS.items()}
 
 def multipass_single(img, model_id, temperature, task):
@@ -277,9 +287,7 @@ def build_multipass_section(model, temperature):
     task = gr.Radio(list(TASKS), value="Transcription", label="Task")
     with gr.Row(equal_height=True):
         with gr.Column(scale=1, min_width=400):
-            image = gr.Image(type="pil", sources=["webcam", "upload"], label="Camera / single image", height=400,
-                             webcam_options=gr.WebcamOptions(mirror=False,
-                                 constraints={"video": {"width": {"ideal": 1920}, "height": {"ideal": 1080}, "frameRate": {"ideal": 30}}}))
+            image = camera()
             button = gr.Button("Transcribe (2 passes)", variant="primary")
         with gr.Column(scale=1, min_width=400):
             first = gr.Textbox(label="Pass 1 (first read)", lines=8)
@@ -399,9 +407,7 @@ with gr.Blocks(title="Handwriting Transcription") as demo:
         status = gr.Markdown()
         model.change(lambda m: (MODELS[m], (f"Loading **{m}**..." if USE_LMSTUDIO else f"Using **{m}**")), inputs=model, outputs=[temperature, status]).then(on_model_change, inputs=model, outputs=[status, temperature])
     with gr.Column():
-        build_section("text", "Vision LLM Handwriting Transcription Demo", cfg["transcription_config"], False, "Transcription", model, temperature)
-    with gr.Column():
-        build_section("form", "Vision LLM Form Transcription Demo", cfg["forms_config"], True, "Form JSON", model, temperature)
+        build_section(model, temperature)
     with gr.Column():
         build_multipass_section(model, temperature)
     with gr.Accordion("Model Analysis Details"):
