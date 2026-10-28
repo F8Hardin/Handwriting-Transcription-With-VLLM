@@ -13,8 +13,6 @@ models:
       temperature: 1.0
     - id: gemini-3.5-flash-lite
       temperature: 1.0
-    - id: gemini-4-argon
-      temperature: 1.0
     - id: gemini-3-flash-preview 
       temperature: 1.0
     - id: gemini-3.1-flash-lite
@@ -34,3 +32,7 @@ transcription_config: llm_transcription_config_gemini.yaml
 backend: gemini
 
 api_key_env: GEMINI_API_KEY
+
+transcription_analysis_csv: demo_analysis_files/scores_test_transcription_2026-10-28_18-47-41.csv
+
+form_analysis_csv: 

@@ -1,14 +1,12 @@
 models:
   - id: google/gemma-4-12b
     temperature: 1.0
-  - id: google/gemma-4-e4b
-    temperature: 1.0
-  - id: google/gemma-4-e2b
-    temperature: 1.0
-  - id: google/gemma-3-12b
-    temperature: 1.0
   - id: qwen/qwen3.5-9b
     temperature: 0.7
+  - id: google/gemma-3-12b
+    temperature: 1.0
+  - id: google/gemma-4-e4b
+    temperature: 1.0
 
 context_length: 32000
 
@@ -20,6 +18,11 @@ transcription_config: llm_transcription_config.yaml
 
 backend: openai
 
-ofs_targets: 
+ofs_targets:
 
 ofs_images: 
+
+transcription_analysis_csv: demo_analysis_files/scores_test_transcription_2026-10-28_18-47-41.csv
+
+form_analysis_csv:
+

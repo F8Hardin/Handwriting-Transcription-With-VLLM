@@ -27,10 +27,12 @@ with open(test_models) as f:
     models = file["models"]
     context_length = file["context_length"]
     chat_url = file["chat_url"].rstrip("/")
-    config_name = file["forms_config"] if dataset == "funsd" else file["transcription_config"]    # prompt/backend config passed to image_to_text
+    config_name = file["forms_config"] if dataset == "funsd" or dataset == "ofs" else file["transcription_config"]    # prompt/backend config passed to image_to_text
     backend = file.get("backend", "openai")
     api_key = os.environ.get(file.get("api_key_env") or "")
 USE_LMSTUDIO = backend == "openai" and not api_key    # load/unload only for a local LM Studio (same gate as demo.py)
+
+print("Config name:", config_name)
 
 ## Setup files ##
 runs_path = runs_home / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -73,7 +75,7 @@ elif dataset == "ofs":
         print("!!! WARNING: Ensure you are testing with self hosted models so the OFS data is not used for AI training. 10 second countdown. Current config: " + str(test_models) )
         time.sleep(10)
         print("Testing handwriting with OFS.")
-    except exception as e:
+    except Exception as e:
         print("ofs_target and ofs_images must be set in the models.yaml file to test on secure OFS data.")
         sys.exit(1)
 elif dataset == "funsd":

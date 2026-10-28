@@ -1,4 +1,5 @@
 import io
+import csv
 import argparse
 import os
 import re
@@ -10,6 +11,7 @@ import logging
 import threading
 from pathlib import Path
 import gradio as gr
+import pandas as pd
 import requests
 import yaml
 from src.llm_transcription import image_to_text, TranscriptionError
@@ -241,20 +243,87 @@ def progress_bar(done: int, total: int) -> str:
             f'<div style="background:#2a78d6;width:{pct}%;height:100%;border-radius:4px;transition:width .3s"></div>'
             f'</div></div>')
 
+## analysis scores: shown next to each model in the dropdown, reused later for tradeoff comparisons ##
+SCORE_FIELDS = ["mean", "std", "consistency", "robustness"]    # order of each SCORES value
+
+def load_scores(key: str) -> tuple[dict[str, list[float | None]], str | None]:
+    """Read the ALL rows of the analysis CSV named by `key` in the models file (transcription_analysis_csv or form_analysis_csv).
+    Returns ({model: [mean, std, consistency, robustness]}, metric). Blank cells become None.
+    Uses the CER rows when present (transcription), otherwise the first metric in the file (e.g. Valid JSON for forms)."""
+    name = cfg.get(key)
+    if not name:
+        return {}, None
+    path = next((p for p in (Path(name), Path(__file__).parent / name, Path(__file__).parent / "src" / name) if p.exists()), None)
+    if path is None:
+        log.error("%s %s not found: showing Results: N/A", key, name)
+        return {}, None
+    with open(path, newline="", encoding="utf-8") as f:
+        rows = [r for r in csv.DictReader(f) if r.get("image") == "ALL"]
+    metrics = [r["metric"] for r in rows]
+    metric = "CER" if "CER" in metrics else (metrics[0] if metrics else None)
+    to_float = lambda v: float(v) if v not in ("", None) else None    # blank: std isn't set on ALL rows; consistency needs 2+ runs
+    return {r["model"]: [to_float(r[k]) for k in SCORE_FIELDS] for r in rows if r["metric"] == metric}, metric
+
+TRANSCRIPTION_SCORES, TRANSCRIPTION_METRIC = load_scores("transcription_analysis_csv")
+FORM_SCORES, FORM_METRIC = load_scores("form_analysis_csv")
+ANALYSIS_MODELS = list(dict.fromkeys([*TRANSCRIPTION_SCORES, *FORM_SCORES]))    # every model in either CSV, in file order, no duplicates
+
+def model_label(model_id: str) -> str:
+    """Top dropdown label: the model's transcription consistency and robustness."""
+    if model_id not in TRANSCRIPTION_SCORES:
+        return f"{model_id}  |  Results: N/A"
+    mean, _, consistency, robustness = TRANSCRIPTION_SCORES[model_id]
+    fmt = lambda v: "N/A" if v is None else f"{v:.3f}"
+    accuracy = "N/A" if mean is None else f"{max(0.0, 1 - mean):.1%}"    # 100% - mean CER, clipped at 0 like the notebook
+    return f"{model_id}  |  Results - Consistency STD: {fmt(consistency)}, Robustness STD: {fmt(robustness)}, Accuracy: {accuracy}"
+
+def score_headers(metric: str | None) -> list[str]:
+    return ["Model", f"Mean {metric or 'score'}", "Consistency (STD)", "Robustness (STD)"]
+
+def scores_table(selected: list[str] | None, scores: dict[str, list[float | None]], metric: str | None) -> pd.DataFrame:
+    """One row per selected model; N/A where the analysis CSV has no entry."""
+    pct = lambda v: "N/A" if v is None else f"{v:.1%}"
+    num = lambda v: "N/A" if v is None else f"{v:.3f}"
+    rows = []
+    for m in selected or []:
+        mean, _, consistency, robustness = scores.get(m, [None] * len(SCORE_FIELDS))
+        rows.append([m, pct(mean), num(consistency), num(robustness)])
+    return pd.DataFrame(rows, columns=score_headers(metric))
+
 first_model = next(iter(MODELS))
 
 with gr.Blocks(title="Handwriting Transcription") as demo:
     with gr.Column():
         gr.Markdown("# Model Setup")
         with gr.Row():
-            model = gr.Dropdown(list(MODELS), value=first_model, label="Model")
+            model = gr.Dropdown([(model_label(m), m) for m in MODELS], value=first_model, label="Model")    # (shown label, value)
             temperature = gr.Number(value=MODELS[first_model], label="Temperature", minimum=0, maximum=2, step=0.1)
+        gr.Markdown("Tip: Model consistency reports an average of how much accuracy varies within a single image. "
+                    "Model robustness reports standard deviation of accuracy across many images.")
         status = gr.Markdown()
         model.change(lambda m: (MODELS[m], (f"Loading **{m}**..." if USE_LMSTUDIO else f"Using **{m}**")), inputs=model, outputs=[temperature, status]).then(on_model_change, inputs=model, outputs=[status, temperature])
     with gr.Column():
         build_section("text", "Vision LLM Handwriting Transcription Demo", cfg["transcription_config"], False, "Transcription", model, temperature)
     with gr.Column():
         build_section("form", "Vision LLM Form Transcription Demo", cfg["forms_config"], True, "Form JSON", model, temperature)
+    with gr.Accordion("Model Analysis Details"):
+        with gr.Row():
+            compare = gr.Dropdown(ANALYSIS_MODELS, value=[], multiselect=True, label="Compare models",
+                                  info="Click models to add them (a check marks each selected one).", scale=4)
+            compare_all = gr.Button("Select all", size="sm", scale=1)
+            compare_none = gr.Button("Clear", size="sm", scale=1)
+        with gr.Accordion("Transcription Analysis"):
+            if not TRANSCRIPTION_SCORES:
+                gr.Markdown("No transcription analysis loaded: set transcription_analysis_csv in the models file.")
+            transcription_table = gr.Dataframe(scores_table([], TRANSCRIPTION_SCORES, TRANSCRIPTION_METRIC), interactive=False)
+        with gr.Accordion("Form Analysis"):
+            if not FORM_SCORES:
+                gr.Markdown("No form analysis loaded: set form_analysis_csv in the models file.")
+            form_table = gr.Dataframe(scores_table([], FORM_SCORES, FORM_METRIC), interactive=False)
+        compare.change(lambda sel: (scores_table(sel, TRANSCRIPTION_SCORES, TRANSCRIPTION_METRIC), scores_table(sel, FORM_SCORES, FORM_METRIC)),
+                       inputs=compare, outputs=[transcription_table, form_table])
+        compare_all.click(lambda: ANALYSIS_MODELS, outputs=compare)
+        compare_none.click(lambda: [], outputs=compare)
     demo.load(current_status, outputs=status)
 
 if __name__ == "__main__":
