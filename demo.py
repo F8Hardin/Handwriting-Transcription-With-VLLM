@@ -8,6 +8,7 @@ import json
 import uuid
 import base64
 import logging
+import difflib
 import threading
 from pathlib import Path
 import gradio as gr
@@ -99,11 +100,14 @@ def on_model_change(model_id):
         status = f"Couldn't load {model_id}. Make sure the model server is running, or contact the administrator. ({friendly(e)})"
     return status, MODELS[model_id]
 
-def run_one(img: Image.Image, model_id, temperature, config: str, as_json: bool) -> tuple[str, bool]:
-    """One image through the model. Returns (text to show, ok)."""
+def transcribe(img: Image.Image, model_id, temperature, config: str, prompt: str | None = None) -> str:
+    """One image through the model. Returns the raw model text."""
     buf = io.BytesIO()
     img.save(buf, format="PNG")
-    text = image_to_text(buf.getvalue(), model_id, temperature, config)["choices"][0]["message"]["content"]
+    return image_to_text(buf.getvalue(), model_id, temperature, config, prompt)["choices"][0]["message"]["content"]
+
+def format_output(text: str, as_json: bool) -> tuple[str, bool]:
+    """Returns (text to show, ok). Forms: strip code fences and pretty-print, ok = valid JSON."""
     if not as_json:
         return text, True
     cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
@@ -111,6 +115,38 @@ def run_one(img: Image.Image, model_id, temperature, config: str, as_json: bool)
         return json.dumps(json.loads(cleaned), indent=2, ensure_ascii=False), True
     except json.JSONDecodeError:
         return "Not valid JSON:\n\n" + text, False
+
+def run_one(img: Image.Image, model_id, temperature, config: str, as_json: bool) -> tuple[str, bool]:
+    """One image through the model. Returns (text to show, ok)."""
+    return format_output(transcribe(img, model_id, temperature, config), as_json)
+
+## multipass "manual review": read once, then the same model checks its own output against the image ##
+REVIEW_PROMPT = """{task}
+
+A previous pass already processed this image. Its output is below. Check it against the image line by line, fix any errors \
+(misread words, missing or extra text, wrong fields), and return the complete corrected output in exactly the same format. \
+Return only the output, with no explanations.
+
+Previous output:
+{previous}"""
+
+def config_prompt(config: str) -> str:
+    with open(Path(__file__).parent / "src" / config, encoding="utf-8") as f:
+        return yaml.safe_load(f)["prompt"]
+
+def run_multipass_parts(img: Image.Image, model_id, temperature, config: str, as_json: bool) -> tuple[str, str, bool, float]:
+    """Pass 1 = normal read, pass 2 = review of pass 1. Returns (pass 1 shown, pass 2 shown, pass 2 ok, share of text changed)."""
+    first = transcribe(img, model_id, temperature, config)
+    second = transcribe(img, model_id, temperature, config, REVIEW_PROMPT.format(task=config_prompt(config), previous=first))
+    (first_shown, _), (second_shown, ok) = format_output(first, as_json), format_output(second, as_json)
+    changed = 1 - difflib.SequenceMatcher(None, first_shown, second_shown).ratio()    # on the cleaned text, so code fences don't count; 0% = no change
+    return first_shown, second_shown, ok, changed
+
+def run_multipass(img: Image.Image, model_id, temperature, config: str, as_json: bool) -> tuple[str, bool]:
+    """Batch view: both passes in one body. Same signature as run_one so the batch handler can use either."""
+    first, second, ok, changed = run_multipass_parts(img, model_id, temperature, config, as_json)
+    return (f"Pass 2 changed {changed:.1%} of the text from pass 1.\n\n"
+            f"--- Pass 2 (review, final output) ---\n{second}\n\n--- Pass 1 (first read) ---\n{first}"), ok
 
 def make_single_handler(config: str, as_json: bool):
     def handler(img, model_id, temperature):
@@ -130,12 +166,12 @@ def render_job(job: dict) -> str:
     current = f"<p>Processing {html.escape(job['current'])}…</p>" if job["current"] else ""
     return progress_bar(job["done"], job["total"]) + "".join(job["items"]) + current
 
-def make_batch_handler(config: str, as_json: bool):
+def make_batch_handler(key: str, config: str, as_json: bool, runner=run_one):
     def handler(img_files, model_id, temperature, request: gr.Request):
         if not img_files:
             raise gr.Error("Upload an image first.")
         with JOBS_LOCK:
-            job = JOBS.setdefault((request.session_hash, config), {"running": False})
+            job = JOBS.setdefault((request.session_hash, key), {"running": False})
             already_running = job["running"]
             if not already_running:
                 job.update(running=True, pending=[], done=0, total=0, items=[], current=None)
@@ -162,7 +198,7 @@ def make_batch_handler(config: str, as_json: bool):
                 try:
                     img = Image.open(path)
                     img_uri = thumb(img)
-                    body, ok = run_one(img, model_id, temperature, config, as_json)
+                    body, ok = runner(img, model_id, temperature, config, as_json)
                 except Exception as e:
                     body, ok = friendly(e), False
                 with JOBS_LOCK:
@@ -213,7 +249,49 @@ def build_section(key: str, title: str, config: str, as_json: bool, out_label: s
     upload_status = gr.HTML(status_html(key))
     results = gr.HTML()
     upload.upload(lambda: status_html(key), outputs=upload_status) \
-          .then(make_batch_handler(config, as_json), inputs=[upload, model, temperature], outputs=results, concurrency_limit=None, trigger_mode="multiple")
+          .then(make_batch_handler(key, config, as_json), inputs=[upload, model, temperature], outputs=results, concurrency_limit=None, trigger_mode="multiple")
+
+TASKS = {"Transcription": (cfg["transcription_config"], False), "Form": (cfg["forms_config"], True)}    # multipass task -> (config, as_json)
+MULTIPASS_BATCH = {task: make_batch_handler(f"multipass-{task}", c, j, run_multipass) for task, (c, j) in TASKS.items()}
+
+def multipass_single(img, model_id, temperature, task):
+    if img is None:
+        raise gr.Error("Capture or upload an image first.")
+    config, as_json = TASKS[task]
+    try:
+        first, second, _, changed = run_multipass_parts(img, model_id, temperature, config, as_json)
+    except Exception as e:
+        raise gr.Error(friendly(e))
+    note = (f"**Pass 2 changed {changed:.1%} of the text from pass 1.** Pass 2 is the output we would show the user. "
+            "A change near 0% means the review mostly agreed with the first read (watch for confirmation bias).")
+    return first, second, note
+
+def multipass_batch(img_files, model_id, temperature, task, request: gr.Request):
+    yield from MULTIPASS_BATCH[task](img_files, model_id, temperature, request)
+
+def build_multipass_section(model, temperature):
+    key = "multipass"
+    gr.Markdown("# Multipass Review Demo (manual review)")
+    gr.Markdown("The model reads the image once (pass 1), then checks its own output against the image and returns a corrected "
+                "final version (pass 2). Each image costs two model calls.")
+    task = gr.Radio(list(TASKS), value="Transcription", label="Task")
+    with gr.Row(equal_height=True):
+        with gr.Column(scale=1, min_width=400):
+            image = gr.Image(type="pil", sources=["webcam", "upload"], label="Camera / single image", height=400,
+                             webcam_options=gr.WebcamOptions(mirror=False,
+                                 constraints={"video": {"width": {"ideal": 1920}, "height": {"ideal": 1080}, "frameRate": {"ideal": 30}}}))
+            button = gr.Button("Transcribe (2 passes)", variant="primary")
+        with gr.Column(scale=1, min_width=400):
+            first = gr.Textbox(label="Pass 1 (first read)", lines=8)
+            second = gr.Textbox(label="Pass 2 (review, final output)", lines=8)
+            change = gr.Markdown()
+    image.upload(lambda im: im, inputs=image, outputs=image)
+    button.click(multipass_single, inputs=[image, model, temperature, task], outputs=[first, second, change], show_progress="minimal")
+    upload = gr.UploadButton("Upload files (single or multiple)", file_types=["image"], file_count="multiple", elem_id=f"{key}-upload")
+    upload_status = gr.HTML(status_html(key))
+    results = gr.HTML()
+    upload.upload(lambda: status_html(key), outputs=upload_status) \
+          .then(multipass_batch, inputs=[upload, model, temperature, task], outputs=results, concurrency_limit=None, trigger_mode="multiple")
 
 def thumb(img: Image.Image) -> str:
     """Browser-safe preview: downsized JPEG as a data URI (works for TIF too)."""
@@ -324,6 +402,8 @@ with gr.Blocks(title="Handwriting Transcription") as demo:
         build_section("text", "Vision LLM Handwriting Transcription Demo", cfg["transcription_config"], False, "Transcription", model, temperature)
     with gr.Column():
         build_section("form", "Vision LLM Form Transcription Demo", cfg["forms_config"], True, "Form JSON", model, temperature)
+    with gr.Column():
+        build_multipass_section(model, temperature)
     with gr.Accordion("Model Analysis Details"):
         with gr.Row():
             compare = gr.Dropdown(ANALYSIS_MODELS, value=[], multiselect=True, label="Compare models",
