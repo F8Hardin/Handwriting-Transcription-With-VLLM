@@ -268,17 +268,20 @@ TRANSCRIPTION_SCORES, TRANSCRIPTION_METRIC = load_scores("transcription_analysis
 FORM_SCORES, FORM_METRIC = load_scores("form_analysis_csv")
 ANALYSIS_MODELS = list(dict.fromkeys([*TRANSCRIPTION_SCORES, *FORM_SCORES]))    # every model in either CSV, in file order, no duplicates
 
+def accuracy(mean: float | None) -> str:
+    """100% - mean error (CER for transcription, Invalid JSON for forms), clipped at 0 like the notebook."""
+    return "N/A" if mean is None else f"{max(0.0, 1 - mean):.1%}"
+
 def model_label(model_id: str) -> str:
     """Top dropdown label: the model's transcription consistency and robustness."""
     if model_id not in TRANSCRIPTION_SCORES:
         return f"{model_id}  |  Results: N/A"
     mean, _, consistency, robustness = TRANSCRIPTION_SCORES[model_id]
     fmt = lambda v: "N/A" if v is None else f"{v:.3f}"
-    accuracy = "N/A" if mean is None else f"{max(0.0, 1 - mean):.1%}"    # 100% - mean CER, clipped at 0 like the notebook
-    return f"{model_id}  |  Results - Consistency STD: {fmt(consistency)}, Robustness STD: {fmt(robustness)}, Accuracy: {accuracy}"
+    return f"{model_id}  |  Results - Consistency STD: {fmt(consistency)}, Robustness STD: {fmt(robustness)}, Accuracy: {accuracy(mean)}"
 
 def score_headers(metric: str | None) -> list[str]:
-    return ["Model", f"Mean {metric or 'score'}", "Consistency (STD)", "Robustness (STD)"]
+    return ["Model", f"Mean {metric or 'score'}", "Accuracy %", "Consistency (STD)", "Robustness (STD)"]
 
 def scores_table(selected: list[str] | None, scores: dict[str, list[float | None]], metric: str | None) -> pd.DataFrame:
     """One row per selected model; N/A where the analysis CSV has no entry."""
@@ -287,7 +290,7 @@ def scores_table(selected: list[str] | None, scores: dict[str, list[float | None
     rows = []
     for m in selected or []:
         mean, _, consistency, robustness = scores.get(m, [None] * len(SCORE_FIELDS))
-        rows.append([m, pct(mean), num(consistency), num(robustness)])
+        rows.append([m, pct(mean), accuracy(mean), num(consistency), num(robustness)])
     return pd.DataFrame(rows, columns=score_headers(metric))
 
 first_model = next(iter(MODELS))
