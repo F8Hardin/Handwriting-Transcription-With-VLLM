@@ -31,14 +31,14 @@ class EmptyResponse(TranscriptionError):
     user_msg = "No text was found. Try better lighting, move closer, and keep the page flat and fully in frame."
 
 ## image to text ##
-def image_to_text(image_bytes: bytes, model_id_override: str | None = None, temperature_override: float | None = None, config_override: str | None = None):
+def image_to_text(image_bytes: bytes, model_id_override: str | None = None, temperature_override: float | None = None, config_override: str | None = None, prompt_override: str | None = None):
     #read from yaml
     config_name = config_override or "config.yaml"
     try:
         with open(Path(__file__).parent / config_name, 'r') as file:
             config = yaml.safe_load(file)
             bPreprocess = config['preprocess']
-            prompt = config['prompt']
+            prompt = prompt_override or config['prompt']    # override: e.g. the multipass review prompt
             model_id = model_id_override or config['model']['id']
             model_temp = config['model']['temperature'] if temperature_override is None else temperature_override
             backend = config.get('backend') or 'openai'
