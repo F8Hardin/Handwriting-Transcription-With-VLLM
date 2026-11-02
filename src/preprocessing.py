@@ -11,7 +11,7 @@ def preprocess(img: Image.Image) -> Image.Image:
     # binary conversion (black text white background)
     img = binarize(img)
     # removing horizontal lines
-    img = remove_horizontal_lines(img)
+     #img = remove_horizontal_lines(img)
     return img
 
 def binarize(img: Image.Image) -> Image.Image:
