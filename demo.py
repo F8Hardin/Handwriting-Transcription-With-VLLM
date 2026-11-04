@@ -122,12 +122,11 @@ def run_multisend(img: Image.Image, model_id, temperature, config: str, as_json:
     for i in range(num_send):
         runs.append(format_output(transcribe(img, model_id, temperature, config), as_json)[0])
 
-    #compare results
-    #pick best
-    #return nicely
     output_str = ""
     for i, run in enumerate(runs):
         output_str += f"---Run {i + 1}---\n {run} \n\n"
+    #output_str += f"!!! Best: {best} \n\n"
+    #output_str += f"Metric 1 {metric_1...} -> why its the best
     return output_str
 
 def run_one(img: Image.Image, model_id, temperature, config: str, as_json: bool, num_send: int) -> tuple[str, bool]:
