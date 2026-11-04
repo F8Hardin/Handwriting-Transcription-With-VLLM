@@ -116,8 +116,24 @@ def format_output(text: str, as_json: bool) -> tuple[str, bool]:
     except json.JSONDecodeError:
         return "Not valid JSON:\n\n" + text, False
 
-def run_one(img: Image.Image, model_id, temperature, config: str, as_json: bool) -> tuple[str, bool]:
+def run_multisend(img: Image.Image, model_id, temperature, config: str, as_json: bool, num_send: int) -> tuple[str, bool]:
+    """num_send runs with an image through the model. Returns (text to show, ok)."""
+    runs = []
+    for i in range(num_send):
+        runs.append(format_output(transcribe(img, model_id, temperature, config), as_json)[0])
+
+    #compare results
+    #pick best
+    #return nicely
+    output_str = ""
+    for i, run in enumerate(runs):
+        output_str += f"---Run {i + 1}---\n {run} \n\n"
+    return output_str
+
+def run_one(img: Image.Image, model_id, temperature, config: str, as_json: bool, num_send: int) -> tuple[str, bool]:
     """One image through the model. Returns (text to show, ok)."""
+    if num_send > 1:
+        return format_output(run_multisend(img, model_id, temperature, config, as_json, num_send), as_json)
     return format_output(transcribe(img, model_id, temperature, config), as_json)
 
 ## multipass "manual review": read once, then the same model checks its own output against the image ##
@@ -157,7 +173,7 @@ def render_job(job: dict) -> str:
     return progress_bar(job["done"], job["total"]) + "".join(job["items"]) + current
 
 def make_batch_handler(key: str, config: str, as_json: bool, runner=run_one):
-    def handler(img_files, model_id, temperature, request: gr.Request):
+    def handler(img_files, model_id, temperature, num_send, request: gr.Request):
         if not img_files:
             raise gr.Error("Upload an image first.")
         with JOBS_LOCK:
@@ -188,8 +204,9 @@ def make_batch_handler(key: str, config: str, as_json: bool, runner=run_one):
                 try:
                     img = Image.open(path)
                     img_uri = thumb(img)
-                    body, ok = runner(img, model_id, temperature, config, as_json)
+                    body, ok = runner(img, model_id, temperature, config, as_json, num_send)
                 except Exception as e:
+                    print("Run failed:", e)
                     body, ok = friendly(e), False
                 with JOBS_LOCK:
                     job["items"].append(form_item(name, ok, body, img_uri))
@@ -230,17 +247,17 @@ def camera() -> gr.Image:
 TASKS = {"Transcription": (cfg["transcription_config"], False), "Form": (cfg["forms_config"], True)}    # task -> (config, as_json)
 STANDARD_BATCH = {task: make_batch_handler(f"single-{task}", c, j) for task, (c, j) in TASKS.items()}
 
-def standard_single(img, model_id, temperature, task):
+def standard_single(img, model_id, temperature, task, num_send):
     if img is None:
         raise gr.Error("Capture or upload an image first.")
     config, as_json = TASKS[task]
     try:
-        return run_one(img, model_id, temperature, config, as_json)[0]
+        return run_one(img, model_id, temperature, config, as_json, num_send)[0]
     except Exception as e:
         raise gr.Error(friendly(e))
 
-def standard_batch(img_files, model_id, temperature, task, request: gr.Request):
-    yield from STANDARD_BATCH[task](img_files, model_id, temperature, request)
+def standard_batch(img_files, model_id, temperature, task, num_send, request: gr.Request):
+    yield from STANDARD_BATCH[task](img_files, model_id, temperature, num_send, request)
 
 def build_section(model, temperature):
     key = "single"
@@ -255,12 +272,14 @@ def build_section(model, temperature):
         with gr.Column(scale=1, min_width=400):
             output = gr.Textbox(label="Output (text or form JSON)", lines=16)
     image.upload(lambda im: im, inputs=image, outputs=image)
-    button.click(standard_single, inputs=[image, model, temperature, task], outputs=output, show_progress="minimal")
+    with gr.Column():
+        num_send = gr.Number(1, label="Number of attempts with model (0 defaults to 1)")
+    button.click(standard_single, inputs=[image, model, temperature, task, num_send], outputs=output, show_progress="minimal")
     upload = gr.UploadButton("Upload files (single or multiple)", file_types=["image"], file_count="multiple", elem_id=f"{key}-upload")
     upload_status = gr.HTML(status_html(key))
     results = gr.HTML()
     upload.upload(lambda: status_html(key), outputs=upload_status) \
-          .then(standard_batch, inputs=[upload, model, temperature, task], outputs=results, concurrency_limit=None, trigger_mode="multiple")
+          .then(standard_batch, inputs=[upload, model, temperature, task, num_send], outputs=results, concurrency_limit=None, trigger_mode="multiple")
 
 MULTIPASS_BATCH = {task: make_batch_handler(f"multipass-{task}", c, j, run_multipass) for task, (c, j) in TASKS.items()}
 
