@@ -16,7 +16,7 @@ def preprocess(img: Image.Image) -> Image.Image:
 
 def binarize(img: Image.Image) -> Image.Image:
     gray = np.array(img.convert("L"))
-    _, bw = cv2.threshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     return Image.fromarray(bw)
 
 def remove_horizontal_lines(img: Image.Image, min_line_frac: float = 0.25) -> Image.Image:
