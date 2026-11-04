@@ -157,7 +157,7 @@ def run_multipass_parts(img: Image.Image, model_id, temperature, config: str, as
     changed = 1 - difflib.SequenceMatcher(None, first_shown, second_shown).ratio()    # on the cleaned text, so code fences don't count; 0% = no change
     return first_shown, second_shown, ok, changed
 
-def run_multipass(img: Image.Image, model_id, temperature, config: str, as_json: bool) -> tuple[str, bool]:
+def run_multipass(img: Image.Image, model_id, temperature, config: str, as_json: bool, num_send) -> tuple[str, bool]:
     """Batch view: both passes in one body. Same signature as run_one so the batch handler can use either."""
     first, second, ok, changed = run_multipass_parts(img, model_id, temperature, config, as_json)
     return (f"Pass 2 changed {changed:.1%} of the text from pass 1.\n\n"
@@ -295,7 +295,7 @@ def multipass_single(img, model_id, temperature, task):
     return first, second, note
 
 def multipass_batch(img_files, model_id, temperature, task, request: gr.Request):
-    yield from MULTIPASS_BATCH[task](img_files, model_id, temperature, request)
+    yield from MULTIPASS_BATCH[task](img_files, model_id, temperature, 0, request)
 
 def build_multipass_section(model, temperature):
     key = "multipass"
