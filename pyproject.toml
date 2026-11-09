@@ -12,7 +12,8 @@ dependencies = [
     "pyyaml",
     "pillow",
     "opencv-python-headless",
-    "numpy"
+    "numpy",
+    "jiwer"
 ]
 
 [project.optional-dependencies]

@@ -4,3 +4,4 @@ pyyaml
 pillow
 opencv-python-headless
 numpy
+jiwer
