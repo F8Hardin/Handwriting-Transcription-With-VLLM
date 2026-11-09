@@ -17,6 +17,7 @@ import requests
 import yaml
 from src.llm_transcription import image_to_text, TranscriptionError
 from PIL import Image
+import jiwer
 
 parser = argparse.ArgumentParser()
 parser.add_argument("models_file", nargs="?", default="models_gemini.yaml", help="models yaml in src/ (or a path), e.g. models_gemini.yaml")
@@ -123,10 +124,43 @@ def run_multisend(img: Image.Image, model_id, temperature, config: str, as_json:
         runs.append(format_output(transcribe(img, model_id, temperature, config), as_json)[0])
 
     output_str = ""
-    for i, run in enumerate(runs):
-        output_str += f"---Run {i + 1}---\n {run} \n\n"
-    #output_str += f"!!! Best: {best} \n\n"
-    #output_str += f"Metric 1 {metric_1...} -> why its the best
+    min_dist = float('inf')
+    min_run = 0
+    distances = []
+    similarities = []
+    
+    comparisons_count = num_send - 1 if num_send > 1 else 1
+
+    for i in range(len(runs)):
+        output_str += f"---Run {i + 1}---\n {runs[i]} \n\n"
+        cumulative_dist = 0
+        total_similarity = 0
+        for j in range(len(runs)):
+            if i != j:
+                word_length_i = len(runs[i].split())
+                curr_dist = jiwer.wer(runs[i], runs[j]) * word_length_i
+                cumulative_dist += curr_dist
+                word_length_j = len(runs[j].split())
+                max_word_len = max(word_length_i, word_length_j)
+                if max_word_len > 0:
+                    run_sim = max(0.0, 1.0 - (curr_dist / max_word_len))
+                else:
+                    run_sim = 1.0
+                
+                total_similarity += run_sim
+                
+        similarities.append((total_similarity / comparisons_count) * 100)
+        distances.append(cumulative_dist)
+        
+        if cumulative_dist < min_dist:
+            min_dist = cumulative_dist
+            min_run = i
+            
+    for i, total_score in enumerate(distances):
+        output_str += f"Metric {i + 1} (Total Word Edits for Run {i + 1}): {total_score:.2f}, Similarity: {similarities[i]:.2f}%\n"
+        
+    output_str += f"!!! Best: {min_run + 1} \n\n"
+    output_str += f"!!! Average Similarity across all runs: {sum(similarities) / num_send:.2f}%"
     return output_str
 
 def run_one(img: Image.Image, model_id, temperature, config: str, as_json: bool, num_send: int) -> tuple[str, bool]:
@@ -154,7 +188,16 @@ def run_multipass_parts(img: Image.Image, model_id, temperature, config: str, as
     first = transcribe(img, model_id, temperature, config)
     second = transcribe(img, model_id, temperature, config, REVIEW_PROMPT.format(task=config_prompt(config), previous=first))
     (first_shown, _), (second_shown, ok) = format_output(first, as_json), format_output(second, as_json)
-    changed = 1 - difflib.SequenceMatcher(None, first_shown, second_shown).ratio()    # on the cleaned text, so code fences don't count; 0% = no change
+    word_length_1 = len(first_shown.split())
+    word_length_2 = len(second_shown.split())
+    max_word_len = max(word_length_1, word_length_2)
+    
+    if max_word_len > 0:
+        abs_word_edits = jiwer.wer(first_shown, second_shown) * word_length_1
+        changed = min(1.0, abs_word_edits / max_word_len)
+    else:
+        changed = 0.0
+        
     return first_shown, second_shown, ok, changed
 
 def run_multipass(img: Image.Image, model_id, temperature, config: str, as_json: bool, num_send) -> tuple[str, bool]:
