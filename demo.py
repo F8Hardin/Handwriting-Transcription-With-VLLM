@@ -17,7 +17,7 @@ from src.transcribe_tools import format_output, single_send, multipass, multisen
 from PIL import Image
 
 parser = argparse.ArgumentParser()
-parser.add_argument("models_file", nargs="?", default="models_gemini.yaml", help="models yaml in src/ (or a path), e.g. models_gemini.yaml")
+parser.add_argument("models_file", nargs="?", default="models.yaml", help="models yaml in src/ (or a path), e.g. models_gemini.yaml")
 parser.add_argument("--port", type=int, default=1111)
 args = parser.parse_args()
 MODELS_FILE = Path(args.models_file) if Path(args.models_file).exists() else Path(__file__).parent / "src" / args.models_file
@@ -98,8 +98,8 @@ def on_model_change(model_id):
         status = f"Couldn't load {model_id}. Make sure the model server is running, or contact the administrator. ({friendly(e)})"
     return status, MODELS[model_id]
 
-def run_multisend(img: Image.Image, model_id, temperature, config: str, as_json: bool, num_send: int) -> tuple[str, bool]:
-    """num_send runs with an image through the model. Returns (text to show, ok)."""
+def run_multisend(img: Image.Image, model_id, temperature, config: str, as_json: bool, num_send: int) -> tuple[str, bool, str]:
+    """num_send runs with an image through the model. Returns (text to show, ok, gauge html)."""
     result = multisend(img, model_id, temperature, config, as_json, num_send)
     distances = result["distances"]
     similarities = [similarity for _, similarity in result["responses"]]
@@ -112,21 +112,21 @@ def run_multisend(img: Image.Image, model_id, temperature, config: str, as_json:
         output_str += f"Metric {i + 1} (Total Word Edits for Run {i + 1}): {total_score:.2f}, Similarity: {similarities[i]:.2f}%\n"
 
     output_str += f"!!! Best: {result['best_index'] + 1} \n\n"
-    output_str += f"!!! Average Similarity across all runs: {sum(similarities) / num_send:.2f}%"
-    return output_str, result["ok"]
+    output_str += f"!!! Average Similarity across all runs: {result['similarity']:.2f}%"
+    return output_str, result["ok"], similarity_gauge([(result["similarity"], *multisend_gauge_text(len(similarities)))])
 
-def run_one(img: Image.Image, model_id, temperature, config: str, as_json: bool, num_send: int) -> tuple[str, bool]:
-    """One image through the model. Returns (text to show, ok)."""
+def run_one(img: Image.Image, model_id, temperature, config: str, as_json: bool, num_send: int) -> tuple[str, bool, str]:
+    """One image through the model. Returns (text to show, ok, gauge html); the gauge is empty for a single send."""
     if num_send > 1:
         return run_multisend(img, model_id, temperature, config, as_json, num_send)
-    return format_output(single_send(img, model_id, temperature, config)["final_response"], as_json)
+    return (*format_output(single_send(img, model_id, temperature, config)["final_response"], as_json), "")
 
 ## multipass "manual review": read once, then the same model checks its own output against the image ##
-def run_multipass(img: Image.Image, model_id, temperature, config: str, as_json: bool, num_send) -> tuple[str, bool]:
+def run_multipass(img: Image.Image, model_id, temperature, config: str, as_json: bool, num_send) -> tuple[str, bool, str]:
     """Batch view: both passes in one body. Same signature as run_one so the batch handler can use either."""
     result = multipass(img, model_id, temperature, config, as_json)
     return (f"Pass 2 changed {result['percent_changed']:.1%} of the text from pass 1.\n\n"
-            f"--- Pass 2 (review, final output) ---\n{result['final_response']}\n\n--- Pass 1 (first read) ---\n{result['original_response']}"), result["ok"]
+            f"--- Pass 2 (review, final output) ---\n{result['final_response']}\n\n--- Pass 1 (first read) ---\n{result['original_response']}"), result["ok"], similarity_gauge([(result["similarity"], *MULTIPASS_GAUGE)])
 
 JOBS = {}
 JOBS_LOCK = threading.Lock()
@@ -165,15 +165,16 @@ def make_batch_handler(key: str, config: str, as_json: bool, runner=run_one):
                     view = render_job(job)
                 yield view
                 img_uri = None
+                gauge = ""
                 try:
                     img = Image.open(path)
                     img_uri = thumb(img)
-                    body, ok = runner(img, model_id, temperature, config, as_json, num_send)
+                    body, ok, gauge = runner(img, model_id, temperature, config, as_json, num_send)
                 except Exception as e:
                     print("Run failed:", e)
-                    body, ok = friendly(e), False
+                    body, ok, gauge = friendly(e), False, ""
                 with JOBS_LOCK:
-                    job["items"].append(form_item(name, ok, body, img_uri))
+                    job["items"].append(form_item(name, ok, body, img_uri, gauge))
                     job["done"] += 1
                     job["current"] = None
                     view = render_job(job)
@@ -216,7 +217,8 @@ def standard_single(img, model_id, temperature, task, num_send):
         raise gr.Error("Capture or upload an image first.")
     config, as_json = TASKS[task]
     try:
-        return run_one(img, model_id, temperature, config, as_json, num_send)[0]
+        text, _, gauge_html = run_one(img, model_id, temperature, config, as_json, num_send)
+        return text, gauge_html
     except Exception as e:
         raise gr.Error(friendly(e))
 
@@ -235,10 +237,11 @@ def build_section(model, temperature):
             button = gr.Button("Transcribe", variant="primary")
         with gr.Column(scale=1, min_width=400):
             output = gr.Textbox(label="Output (text or form JSON)", lines=16)
+            gauge = gr.HTML()
     image.upload(lambda im: im, inputs=image, outputs=image)
     with gr.Column():
         num_send = gr.Number(1, label="Number of attempts with model (0 defaults to 1)")
-    button.click(standard_single, inputs=[image, model, temperature, task, num_send], outputs=output, show_progress="minimal")
+    button.click(standard_single, inputs=[image, model, temperature, task, num_send], outputs=[output, gauge], show_progress="minimal")
     upload = gr.UploadButton("Upload files (single or multiple)", file_types=["image"], file_count="multiple", elem_id=f"{key}-upload")
     upload_status = gr.HTML(status_html(key))
     results = gr.HTML()
@@ -258,7 +261,7 @@ def multipass_single(img, model_id, temperature, task):
     first, second, changed = result["original_response"], result["final_response"], result["percent_changed"]
     note = (f"**Pass 2 changed {changed:.1%} of the text from pass 1.** Pass 2 is the output we would show the user. "
             "A change near 0% means the review mostly agreed with the first read (watch for confirmation bias).")
-    return first, second, note
+    return first, second, note, similarity_gauge([(result["similarity"], *MULTIPASS_GAUGE)])
 
 def multipass_batch(img_files, model_id, temperature, task, request: gr.Request):
     yield from MULTIPASS_BATCH[task](img_files, model_id, temperature, 0, request)
@@ -277,8 +280,9 @@ def build_multipass_section(model, temperature):
             first = gr.Textbox(label="Pass 1 (first read)", lines=8)
             second = gr.Textbox(label="Pass 2 (review, final output)", lines=8)
             change = gr.Markdown()
+            gauge = gr.HTML()
     image.upload(lambda im: im, inputs=image, outputs=image)
-    button.click(multipass_single, inputs=[image, model, temperature, task], outputs=[first, second, change], show_progress="minimal")
+    button.click(multipass_single, inputs=[image, model, temperature, task], outputs=[first, second, change, gauge], show_progress="minimal")
     upload = gr.UploadButton("Upload files (single or multiple)", file_types=["image"], file_count="multiple", elem_id=f"{key}-upload")
     upload_status = gr.HTML(status_html(key))
     results = gr.HTML()
@@ -293,7 +297,35 @@ def thumb(img: Image.Image) -> str:
     im.convert("RGB").save(buf, format="JPEG", quality=80)
     return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
 
-def form_item(name: str, ok: bool, body: str, img_uri: str | None = None) -> str:
+GAUGE_LEVELS = ((90, "High", "#0ca30c"), (70, "Medium", "#eda100"), (0, "Low", "#d03b3b"))    # (min pct, status word, colour), highest first
+GAUGE_TRACK = "#e6e5e0"
+GAUGE_MUTED = "#6b6a65"
+MULTIPASS_GAUGE = ("Pass 1 vs Pass 2", "Share of pass 1's words that pass 2 kept unchanged (100% minus words changed). "
+                   "Higher = the review made fewer corrections.")
+
+def multisend_gauge_text(n: int) -> tuple[str, str]:
+    return (f"Agreement across {n} sends", f"How alike the {n} responses are, word by word, averaged over every pair. "
+            "Higher = the model gives the same answer each time.")
+
+def similarity_gauge(gauges: list[tuple[float, str, str]]) -> str:
+    """Row of half-circle dials, one per (value_pct 0-100, label, explanation). The status word keeps the meaning from being colour-only."""
+    dials = []
+    for value, label, explanation in gauges:
+        pct = max(0.0, min(100.0, value))
+        word, color = next((w, c) for t, w, c in GAUGE_LEVELS if pct >= t)
+        arc = 'd="M 10 70 A 60 60 0 0 1 130 70" fill="none" stroke-width="12" pathLength="100"'    # semicircle, 100 units long so dasharray = percent
+        dials.append(f'<div style="width:200px;text-align:center">'
+                     f'<svg viewBox="0 0 140 84" width="160" role="img" aria-label="{html.escape(label)}: {pct:.1f}% ({word})">'
+                     f'<path {arc} stroke="{GAUGE_TRACK}"/>'
+                     f'<path {arc} stroke="{color}" stroke-dasharray="{pct:.3f} 100"/>'
+                     f'<text x="70" y="62" text-anchor="middle" font-size="20" font-weight="700" fill="currentColor">{pct:.1f}%</text>'
+                     f'<text x="70" y="79" text-anchor="middle" font-size="12" font-weight="600" fill="{color}">{word}</text>'
+                     f'</svg>'
+                     f'<div style="font-size:12px;font-weight:600;color:{GAUGE_MUTED}">{html.escape(label)}</div>'
+                     f'<div style="font-size:11px;line-height:1.35;color:{GAUGE_MUTED};margin-top:2px">{html.escape(explanation)}</div></div>')
+    return f'<div style="display:flex;flex-wrap:wrap;gap:12px;margin:4px 0 8px">{"".join(dials)}</div>' if dials else ""
+
+def form_item(name: str, ok: bool, body: str, img_uri: str | None = None, gauge_html: str = "") -> str:
     color = "#0ca30c" if ok else "#d03b3b"
     icon = "✓" if ok else "✗"
     img_tag = (f'<div style="flex:1 1 320px;min-width:0">'
@@ -302,7 +334,8 @@ def form_item(name: str, ok: bool, body: str, img_uri: str | None = None) -> str
             f'<summary style="cursor:pointer;color:{color};font-weight:600">{icon} {html.escape(name)}</summary>'
             f'<div style="display:flex;flex-wrap:wrap;gap:12px;margin-top:8px;align-items:flex-start">'
             f'{img_tag}'
-            f'<pre style="flex:1 1 320px;min-width:0;margin:0;white-space:pre-wrap;overflow-wrap:anywhere">{html.escape(body)}</pre>'
+            f'<div style="flex:1 1 320px;min-width:0">{gauge_html}'
+            f'<pre style="margin:0;white-space:pre-wrap;overflow-wrap:anywhere">{html.escape(body)}</pre></div>'
             f'</div></details>')
 
 def progress_bar(done: int, total: int) -> str:
