@@ -2,25 +2,22 @@ import io
 import csv
 import argparse
 import os
-import re
 import html
-import json
 import uuid
 import base64
 import logging
-import difflib
 import threading
 from pathlib import Path
 import gradio as gr
 import pandas as pd
 import requests
 import yaml
-from src.llm_transcription import image_to_text, TranscriptionError
+from src.llm_transcription import TranscriptionError
+from src.transcribe_tools import format_output, single_send, multipass, multisend
 from PIL import Image
-import jiwer
 
 parser = argparse.ArgumentParser()
-parser.add_argument("models_file", nargs="?", default="models_gemini.yaml", help="models yaml in src/ (or a path), e.g. models_gemini.yaml")
+parser.add_argument("models_file", nargs="?", default="models.yaml", help="models yaml in src/ (or a path), e.g. models_gemini.yaml")
 parser.add_argument("--port", type=int, default=1111)
 args = parser.parse_args()
 MODELS_FILE = Path(args.models_file) if Path(args.models_file).exists() else Path(__file__).parent / "src" / args.models_file
@@ -101,110 +98,35 @@ def on_model_change(model_id):
         status = f"Couldn't load {model_id}. Make sure the model server is running, or contact the administrator. ({friendly(e)})"
     return status, MODELS[model_id]
 
-def transcribe(img: Image.Image, model_id, temperature, config: str, prompt: str | None = None) -> str:
-    """One image through the model. Returns the raw model text."""
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return image_to_text(buf.getvalue(), model_id, temperature, config, prompt)["choices"][0]["message"]["content"]
-
-def format_output(text: str, as_json: bool) -> tuple[str, bool]:
-    """Returns (text to show, ok). Forms: strip code fences and pretty-print, ok = valid JSON."""
-    if not as_json:
-        return text, True
-    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
-    try:
-        return json.dumps(json.loads(cleaned), indent=2, ensure_ascii=False), True
-    except json.JSONDecodeError:
-        return "Not valid JSON:\n\n" + text, False
-
 def run_multisend(img: Image.Image, model_id, temperature, config: str, as_json: bool, num_send: int) -> tuple[str, bool]:
     """num_send runs with an image through the model. Returns (text to show, ok)."""
-    runs = []
-    for i in range(num_send):
-        runs.append(format_output(transcribe(img, model_id, temperature, config), as_json)[0])
+    result = multisend(img, model_id, temperature, config, as_json, num_send)
+    distances = result["distances"]
+    similarities = [similarity for _, similarity in result["responses"]]
 
     output_str = ""
-    min_dist = float('inf')
-    min_run = 0
-    distances = []
-    similarities = []
-    
-    comparisons_count = num_send - 1 if num_send > 1 else 1
+    for i, (text, _) in enumerate(result["responses"]):
+        output_str += f"---Run {i + 1}---\n {text} \n\n"
 
-    for i in range(len(runs)):
-        output_str += f"---Run {i + 1}---\n {runs[i]} \n\n"
-        cumulative_dist = 0
-        total_similarity = 0
-        for j in range(len(runs)):
-            if i != j:
-                word_length_i = len(runs[i].split())
-                curr_dist = jiwer.wer(runs[i], runs[j]) * word_length_i
-                cumulative_dist += curr_dist
-                word_length_j = len(runs[j].split())
-                max_word_len = max(word_length_i, word_length_j)
-                if max_word_len > 0:
-                    run_sim = max(0.0, 1.0 - (curr_dist / max_word_len))
-                else:
-                    run_sim = 1.0
-                
-                total_similarity += run_sim
-                
-        similarities.append((total_similarity / comparisons_count) * 100)
-        distances.append(cumulative_dist)
-        
-        if cumulative_dist < min_dist:
-            min_dist = cumulative_dist
-            min_run = i
-            
     for i, total_score in enumerate(distances):
         output_str += f"Metric {i + 1} (Total Word Edits for Run {i + 1}): {total_score:.2f}, Similarity: {similarities[i]:.2f}%\n"
-        
-    output_str += f"!!! Best: {min_run + 1} \n\n"
+
+    output_str += f"!!! Best: {result['best_index'] + 1} \n\n"
     output_str += f"!!! Average Similarity across all runs: {sum(similarities) / num_send:.2f}%"
-    return output_str
+    return output_str, result["ok"]
 
 def run_one(img: Image.Image, model_id, temperature, config: str, as_json: bool, num_send: int) -> tuple[str, bool]:
     """One image through the model. Returns (text to show, ok)."""
     if num_send > 1:
-        return format_output(run_multisend(img, model_id, temperature, config, as_json, num_send), as_json)
-    return format_output(transcribe(img, model_id, temperature, config), as_json)
+        return run_multisend(img, model_id, temperature, config, as_json, num_send)
+    return format_output(single_send(img, model_id, temperature, config)["final_response"], as_json)
 
 ## multipass "manual review": read once, then the same model checks its own output against the image ##
-REVIEW_PROMPT = """{task}
-
-A previous pass already processed this image. Its output is below. Check it against the image line by line, fix any errors \
-(misread words, missing or extra text, wrong fields), and return the complete corrected output in exactly the same format. \
-Return only the output, with no explanations.
-
-Previous output:
-{previous}"""
-
-def config_prompt(config: str) -> str:
-    with open(Path(__file__).parent / "src" / config, encoding="utf-8") as f:
-        return yaml.safe_load(f)["prompt"]
-
-def run_multipass_parts(img: Image.Image, model_id, temperature, config: str, as_json: bool) -> tuple[str, str, bool, float]:
-    """Pass 1 = normal read, pass 2 = review of pass 1. Returns (pass 1 shown, pass 2 shown, pass 2 ok, share of text changed)."""
-    first = transcribe(img, model_id, temperature, config)
-    second = transcribe(img, model_id, temperature, config, REVIEW_PROMPT.format(task=config_prompt(config), previous=first))
-    (first_shown, _), (second_shown, ok) = format_output(first, as_json), format_output(second, as_json)
-    word_length_1 = len(first_shown.split())
-    word_length_2 = len(second_shown.split())
-    max_word_len = max(word_length_1, word_length_2)
-    
-    if max_word_len > 0:
-        abs_word_edits = jiwer.wer(first_shown, second_shown) * word_length_1
-        changed = min(1.0, abs_word_edits / max_word_len)
-    else:
-        changed = 0.0
-        
-    return first_shown, second_shown, ok, changed
-
 def run_multipass(img: Image.Image, model_id, temperature, config: str, as_json: bool, num_send) -> tuple[str, bool]:
     """Batch view: both passes in one body. Same signature as run_one so the batch handler can use either."""
-    first, second, ok, changed = run_multipass_parts(img, model_id, temperature, config, as_json)
-    return (f"Pass 2 changed {changed:.1%} of the text from pass 1.\n\n"
-            f"--- Pass 2 (review, final output) ---\n{second}\n\n--- Pass 1 (first read) ---\n{first}"), ok
+    result = multipass(img, model_id, temperature, config, as_json)
+    return (f"Pass 2 changed {result['percent_changed']:.1%} of the text from pass 1.\n\n"
+            f"--- Pass 2 (review, final output) ---\n{result['final_response']}\n\n--- Pass 1 (first read) ---\n{result['original_response']}"), result["ok"]
 
 JOBS = {}
 JOBS_LOCK = threading.Lock()
@@ -330,9 +252,10 @@ def multipass_single(img, model_id, temperature, task):
         raise gr.Error("Capture or upload an image first.")
     config, as_json = TASKS[task]
     try:
-        first, second, _, changed = run_multipass_parts(img, model_id, temperature, config, as_json)
+        result = multipass(img, model_id, temperature, config, as_json)
     except Exception as e:
         raise gr.Error(friendly(e))
+    first, second, changed = result["original_response"], result["final_response"], result["percent_changed"]
     note = (f"**Pass 2 changed {changed:.1%} of the text from pass 1.** Pass 2 is the output we would show the user. "
             "A change near 0% means the review mostly agreed with the first read (watch for confirmation bias).")
     return first, second, note
