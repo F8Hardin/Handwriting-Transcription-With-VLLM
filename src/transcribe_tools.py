@@ -38,7 +38,7 @@ def single_send(img: Image.Image, model_id, temperature, config: str, prompt: st
     return {"final_response": image_to_text(buf.getvalue(), model_id, temperature, config, prompt)["choices"][0]["message"]["content"]}
 
 def multipass(img: Image.Image, model_id, temperature, config: str, as_json: bool) -> dict:
-    #returns json with fields: final_response, original_response, percent_changed, ok
+    #returns json with fields: final_response, original_response, percent_changed, similarity (0-100, pass 1 vs pass 2), ok
     first = single_send(img, model_id, temperature, config)["final_response"]
     second = single_send(img, model_id, temperature, config, REVIEW_PROMPT.format(task=config_prompt(config), previous=first))["final_response"]
     (first_shown, _), (second_shown, ok) = format_output(first, as_json), format_output(second, as_json)
@@ -48,10 +48,10 @@ def multipass(img: Image.Image, model_id, temperature, config: str, as_json: boo
         changed = min(1.0, jiwer.wer(first_shown, second_shown) * word_length_1 / max_word_len)
     else:
         changed = 0.0
-    return {"final_response": second_shown, "original_response": first_shown, "percent_changed": changed, "ok": ok}
+    return {"final_response": second_shown, "original_response": first_shown, "percent_changed": changed, "similarity": (1 - changed) * 100, "ok": ok}
 
 def multisend(img: Image.Image, model_id, temperature, config: str, as_json: bool, num_send: int) -> dict:
-    #returns json with fields: final_response, responses ([text, similarity %] per run), best_index, distances, ok
+    #returns json with fields: final_response, responses ([text, similarity %] per run), best_index, distances, similarity (0-100, mean of the per-run similarities), ok
     formatted = [format_output(single_send(img, model_id, temperature, config)["final_response"], as_json) for _ in range(num_send)]
     runs = [text for text, _ in formatted]
     comparisons_count = num_send - 1 if num_send > 1 else 1
@@ -73,4 +73,4 @@ def multisend(img: Image.Image, model_id, temperature, config: str, as_json: boo
         similarities.append((total_similarity / comparisons_count) * 100)
         distances.append(cumulative_dist)
     best = distances.index(min(distances))
-    return {"final_response": runs[best], "responses": [[text, sim] for text, sim in zip(runs, similarities)], "best_index": best, "distances": distances, "ok": formatted[best][1]}
+    return {"final_response": runs[best], "responses": [[text, sim] for text, sim in zip(runs, similarities)], "best_index": best, "distances": distances, "similarity": sum(similarities) / len(similarities), "ok": formatted[best][1]}
