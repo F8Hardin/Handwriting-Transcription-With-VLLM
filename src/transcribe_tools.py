@@ -50,27 +50,46 @@ def multipass(img: Image.Image, model_id, temperature, config: str, as_json: boo
         changed = 0.0
     return {"final_response": second_shown, "original_response": first_shown, "percent_changed": changed, "similarity": (1 - changed) * 100, "ok": ok}
 
-def multisend(img: Image.Image, model_id, temperature, config: str, as_json: bool, num_send: int) -> dict:
-    #returns json with fields: final_response, responses ([text, similarity %] per run), best_index, distances, similarity (0-100, mean of the per-run similarities), ok
-    formatted = [format_output(single_send(img, model_id, temperature, config)["final_response"], as_json) for _ in range(num_send)]
-    runs = [text for text, _ in formatted]
-    comparisons_count = num_send - 1 if num_send > 1 else 1
+def compare_responses(texts: list[str]) -> dict:
+    #returns json with fields: similarities (% per text vs the rest), distances (total word edits per text), best_index (lowest total distance, first wins ties), similarity (mean of similarities)
+    comparisons_count = len(texts) - 1 if len(texts) > 1 else 1
     distances = []
     similarities = []
-    for i in range(len(runs)):
+    for i in range(len(texts)):
         cumulative_dist = 0
         total_similarity = 0
-        for j in range(len(runs)):
+        for j in range(len(texts)):
             if i != j:
-                word_length_i = len(runs[i].split())
-                curr_dist = jiwer.wer(runs[i], runs[j]) * word_length_i
+                word_length_i = len(texts[i].split())
+                curr_dist = jiwer.wer(texts[i], texts[j]) * word_length_i
                 cumulative_dist += curr_dist
-                max_word_len = max(word_length_i, len(runs[j].split()))
+                max_word_len = max(word_length_i, len(texts[j].split()))
                 if max_word_len > 0:
                     total_similarity += max(0.0, 1.0 - (curr_dist / max_word_len))
                 else:
                     total_similarity += 1.0
         similarities.append((total_similarity / comparisons_count) * 100)
         distances.append(cumulative_dist)
-    best = distances.index(min(distances))
-    return {"final_response": runs[best], "responses": [[text, sim] for text, sim in zip(runs, similarities)], "best_index": best, "distances": distances, "similarity": sum(similarities) / len(similarities), "ok": formatted[best][1]}
+    return {"similarities": similarities, "distances": distances, "best_index": distances.index(min(distances)), "similarity": sum(similarities) / len(similarities)}
+
+def multisend(img: Image.Image, model_id, temperature, config: str, as_json: bool, num_send: int) -> dict:
+    #returns json with fields: final_response, responses ([text, similarity %] per run), best_index, distances, similarity (0-100, mean of the per-run similarities), ok
+    formatted = [format_output(single_send(img, model_id, temperature, config)["final_response"], as_json) for _ in range(num_send)]
+    runs = [text for text, _ in formatted]
+    cmp = compare_responses(runs)
+    best = cmp["best_index"]
+    return {"final_response": runs[best], "responses": [[text, sim] for text, sim in zip(runs, cmp["similarities"])], "best_index": best, "distances": cmp["distances"], "similarity": cmp["similarity"], "ok": formatted[best][1]}
+
+def multimodel(img: Image.Image, models: list[tuple[str, float]], config: str, as_json: bool, prepare=None) -> dict:
+    #returns json with fields: final_response, best_model, best_index, responses ([model, text, similarity %] per model), distances, similarity, ok
+    if len(models) < 2:
+        raise ValueError("Comparing models needs at least 2 models")
+    formatted = []
+    for model_id, temperature in models:
+        if prepare:
+            prepare(model_id)
+        formatted.append(format_output(single_send(img, model_id, temperature, config)["final_response"], as_json))
+    texts = [text for text, _ in formatted]
+    cmp = compare_responses(texts)
+    best = cmp["best_index"]
+    return {"final_response": texts[best], "best_model": models[best][0], "best_index": best, "responses": [[model_id, text, sim] for (model_id, _), text, sim in zip(models, texts, cmp["similarities"])], "distances": cmp["distances"], "similarity": cmp["similarity"], "ok": formatted[best][1]}
