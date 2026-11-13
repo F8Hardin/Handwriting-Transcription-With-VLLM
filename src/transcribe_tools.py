@@ -37,10 +37,10 @@ def single_send(img: Image.Image, model_id, temperature, config: str, prompt: st
     img.save(buf, format="PNG")
     return {"final_response": image_to_text(buf.getvalue(), model_id, temperature, config, prompt)["choices"][0]["message"]["content"]}
 
-def multipass(img: Image.Image, model_id, temperature, config: str, as_json: bool) -> dict:
+def multipass(img: Image.Image, model_id, temperature, config: str, as_json: bool, prompt: str | None = None) -> dict:
     #returns json with fields: final_response, original_response, percent_changed, similarity (0-100, pass 1 vs pass 2), ok
-    first = single_send(img, model_id, temperature, config)["final_response"]
-    second = single_send(img, model_id, temperature, config, REVIEW_PROMPT.format(task=config_prompt(config), previous=first))["final_response"]
+    first = single_send(img, model_id, temperature, config, prompt)["final_response"]
+    second = single_send(img, model_id, temperature, config, REVIEW_PROMPT.format(task=prompt or config_prompt(config), previous=first))["final_response"]
     (first_shown, _), (second_shown, ok) = format_output(first, as_json), format_output(second, as_json)
     word_length_1 = len(first_shown.split())
     max_word_len = max(word_length_1, len(second_shown.split()))
@@ -72,15 +72,15 @@ def compare_responses(texts: list[str]) -> dict:
         distances.append(cumulative_dist)
     return {"similarities": similarities, "distances": distances, "best_index": distances.index(min(distances)), "similarity": sum(similarities) / len(similarities)}
 
-def multisend(img: Image.Image, model_id, temperature, config: str, as_json: bool, num_send: int) -> dict:
+def multisend(img: Image.Image, model_id, temperature, config: str, as_json: bool, num_send: int, prompt: str | None = None) -> dict:
     #returns json with fields: final_response, responses ([text, similarity %] per run), best_index, distances, similarity (0-100, mean of the per-run similarities), ok
-    formatted = [format_output(single_send(img, model_id, temperature, config)["final_response"], as_json) for _ in range(num_send)]
+    formatted = [format_output(single_send(img, model_id, temperature, config, prompt)["final_response"], as_json) for _ in range(num_send)]
     runs = [text for text, _ in formatted]
     cmp = compare_responses(runs)
     best = cmp["best_index"]
     return {"final_response": runs[best], "responses": [[text, sim] for text, sim in zip(runs, cmp["similarities"])], "best_index": best, "distances": cmp["distances"], "similarity": cmp["similarity"], "ok": formatted[best][1]}
 
-def multimodel(img: Image.Image, models: list[tuple[str, float]], config: str, as_json: bool, prepare=None) -> dict:
+def multimodel(img: Image.Image, models: list[tuple[str, float]], config: str, as_json: bool, prepare=None, prompt: str | None = None) -> dict:
     #returns json with fields: final_response, best_model, best_index, responses ([model, text, similarity %] per model), distances, similarity, ok
     if len(models) < 2:
         raise ValueError("Comparing models needs at least 2 models")
@@ -88,7 +88,7 @@ def multimodel(img: Image.Image, models: list[tuple[str, float]], config: str, a
     for model_id, temperature in models:
         if prepare:
             prepare(model_id)
-        formatted.append(format_output(single_send(img, model_id, temperature, config)["final_response"], as_json))
+        formatted.append(format_output(single_send(img, model_id, temperature, config, prompt)["final_response"], as_json))
     texts = [text for text, _ in formatted]
     cmp = compare_responses(texts)
     best = cmp["best_index"]
