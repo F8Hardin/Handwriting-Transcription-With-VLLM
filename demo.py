@@ -13,7 +13,7 @@ import pandas as pd
 import requests
 import yaml
 from src.llm_transcription import TranscriptionError
-from src.transcribe_tools import format_output, single_send, multipass, multisend
+from src.transcribe_tools import format_output, single_send, multipass, multimodel
 from PIL import Image
 
 parser = argparse.ArgumentParser()
@@ -98,27 +98,8 @@ def on_model_change(model_id):
         status = f"Couldn't load {model_id}. Make sure the model server is running, or contact the administrator. ({friendly(e)})"
     return status, MODELS[model_id]
 
-def run_multisend(img: Image.Image, model_id, temperature, config: str, as_json: bool, num_send: int) -> tuple[str, bool, str]:
-    """num_send runs with an image through the model. Returns (text to show, ok, gauge html)."""
-    result = multisend(img, model_id, temperature, config, as_json, num_send)
-    distances = result["distances"]
-    similarities = [similarity for _, similarity in result["responses"]]
-
-    output_str = ""
-    for i, (text, _) in enumerate(result["responses"]):
-        output_str += f"---Run {i + 1}---\n {text} \n\n"
-
-    for i, total_score in enumerate(distances):
-        output_str += f"Metric {i + 1} (Total Word Edits for Run {i + 1}): {total_score:.2f}, Similarity: {similarities[i]:.2f}%\n"
-
-    output_str += f"!!! Best: {result['best_index'] + 1} \n\n"
-    output_str += f"!!! Average Similarity across all runs: {result['similarity']:.2f}%"
-    return output_str, result["ok"], similarity_gauge([(result["similarity"], *multisend_gauge_text(len(similarities)))])
-
-def run_one(img: Image.Image, model_id, temperature, config: str, as_json: bool, num_send: int) -> tuple[str, bool, str]:
-    """One image through the model. Returns (text to show, ok, gauge html); the gauge is empty for a single send."""
-    if num_send > 1:
-        return run_multisend(img, model_id, temperature, config, as_json, num_send)
+def run_one(img: Image.Image, model_id, temperature, config: str, as_json: bool, _num_send=0) -> tuple[str, bool, str]:
+    """One image, one send. Returns (text to show, ok, gauge html); no gauge for a single send."""
     return (*format_output(single_send(img, model_id, temperature, config)["final_response"], as_json), "")
 
 ## multipass "manual review": read once, then the same model checks its own output against the image ##
@@ -212,18 +193,18 @@ def camera() -> gr.Image:
 TASKS = {"Transcription": (cfg["transcription_config"], False), "Form": (cfg["forms_config"], True)}    # task -> (config, as_json)
 STANDARD_BATCH = {task: make_batch_handler(f"single-{task}", c, j) for task, (c, j) in TASKS.items()}
 
-def standard_single(img, model_id, temperature, task, num_send):
+def standard_single(img, model_id, temperature, task):
     if img is None:
         raise gr.Error("Capture or upload an image first.")
     config, as_json = TASKS[task]
     try:
-        text, _, gauge_html = run_one(img, model_id, temperature, config, as_json, num_send)
+        text, _, gauge_html = run_one(img, model_id, temperature, config, as_json)
         return text, gauge_html
     except Exception as e:
         raise gr.Error(friendly(e))
 
-def standard_batch(img_files, model_id, temperature, task, num_send, request: gr.Request):
-    yield from STANDARD_BATCH[task](img_files, model_id, temperature, num_send, request)
+def standard_batch(img_files, model_id, temperature, task, request: gr.Request):
+    yield from STANDARD_BATCH[task](img_files, model_id, temperature, 0, request)
 
 def build_section(model, temperature):
     key = "single"
@@ -239,14 +220,12 @@ def build_section(model, temperature):
             output = gr.Textbox(label="Output (text or form JSON)", lines=16)
             gauge = gr.HTML()
     image.upload(lambda im: im, inputs=image, outputs=image)
-    with gr.Column():
-        num_send = gr.Number(1, label="Number of attempts with model (0 defaults to 1)")
-    button.click(standard_single, inputs=[image, model, temperature, task, num_send], outputs=[output, gauge], show_progress="minimal")
+    button.click(standard_single, inputs=[image, model, temperature, task], outputs=[output, gauge], show_progress="minimal")
     upload = gr.UploadButton("Upload files (single or multiple)", file_types=["image"], file_count="multiple", elem_id=f"{key}-upload")
     upload_status = gr.HTML(status_html(key))
     results = gr.HTML()
     upload.upload(lambda: status_html(key), outputs=upload_status) \
-          .then(standard_batch, inputs=[upload, model, temperature, task, num_send], outputs=results, concurrency_limit=None, trigger_mode="multiple")
+          .then(standard_batch, inputs=[upload, model, temperature, task], outputs=results, concurrency_limit=None, trigger_mode="multiple")
 
 MULTIPASS_BATCH = {task: make_batch_handler(f"multipass-{task}", c, j, run_multipass) for task, (c, j) in TASKS.items()}
 
@@ -289,6 +268,99 @@ def build_multipass_section(model, temperature):
     upload.upload(lambda: status_html(key), outputs=upload_status) \
           .then(multipass_batch, inputs=[upload, model, temperature, task], outputs=results, concurrency_limit=None, trigger_mode="multiple")
 
+## compare models: the same image through N different models, scored for agreement ##
+COMPARE_MIN, COMPARE_MAX = 2, 5
+
+def compare_prepare():
+    """Local LM Studio holds one model at a time, so load each model just before its send. Hosted APIs need nothing."""
+    return load_model if USE_LMSTUDIO else None
+
+def run_compare(img: Image.Image, models, _temperature, config: str, as_json: bool, _num_send) -> tuple[str, bool, str]:
+    """models is a list of (model_id, temperature). Same signature as run_one so the batch handler can use it."""
+    result = multimodel(img, models, config, as_json, compare_prepare())
+    parts = [f"Best agreement: {result['best_model']} (we would show this output)", ""]
+    for model_id, text, sim in result["responses"]:
+        parts += [f"--- {model_id} (similarity {sim:.2f}%) ---", text, ""]
+    parts.append(f"Average similarity across {len(models)} models: {result['similarity']:.2f}%")
+    return "\n".join(parts), result["ok"], similarity_gauge([(result["similarity"], *compare_gauge_text(len(models)))])
+
+COMPARE_BATCH = {task: make_batch_handler(f"compare-{task}", c, j, run_compare) for task, (c, j) in TASKS.items()}
+
+def compare_models(n, picks) -> list[tuple[str, float]]:
+    """First n picks (clamped to 2..5, blank = 2) as (model_id, its default temperature)."""
+    n = min(max(2 if n is None else int(n), COMPARE_MIN), COMPARE_MAX)
+    if any(m not in MODELS for m in picks[:n]):
+        raise gr.Error("Pick a model in every dropdown.")
+    return [(m, MODELS[m]) for m in picks[:n]]
+
+def reload_top_model(model_id) -> None:
+    """After comparing, put the top Model dropdown's model back so the other sections keep working."""
+    if USE_LMSTUDIO:
+        try:
+            load_model(model_id)
+        except Exception as e:
+            log.error("Reloading %s after compare failed: %r", model_id, e)
+
+def compare_single(img, top_model, task, n, m1, m2, m3, m4, m5):
+    if img is None:
+        raise gr.Error("Capture or upload an image first.")
+    config, as_json = TASKS[task]
+    models = compare_models(n, [m1, m2, m3, m4, m5])
+    try:
+        text, _, gauge_html = run_compare(img, models, None, config, as_json, 0)
+        return text, gauge_html
+    except Exception as e:
+        raise gr.Error(friendly(e))
+    finally:
+        reload_top_model(top_model)
+
+def compare_batch(img_files, top_model, task, n, m1, m2, m3, m4, m5, request: gr.Request):
+    models = compare_models(n, [m1, m2, m3, m4, m5])
+    busy = JOBS.get((request.session_hash, f"compare-{task}"), {}).get("running")    # a running worker takes new files; don't pull its models away
+    try:
+        yield from COMPARE_BATCH[task](img_files, models, None, n, request)
+    finally:
+        if img_files and not busy:
+            reload_top_model(top_model)
+
+def on_compare_count(n):
+    """Clamp the model count to 2..5, say so if we changed it, and show only that many dropdowns. Blank counts as 2 without touching the field."""
+    k = COMPARE_MIN if n is None else int(n)
+    c = min(max(k, COMPARE_MIN), COMPARE_MAX)
+    if c == k:
+        msg = ""
+    else:
+        msg = f"Compare Models supports {COMPARE_MIN} to {COMPARE_MAX} models, so it's set to {c}."
+    return (gr.update(value=c) if c != k else gr.update()), msg, *[gr.update(visible=i < c) for i in range(COMPARE_MAX)]
+
+def build_compare_section(model):
+    key = "compare"
+    gr.Markdown("# Compare Models Demo")
+    gr.Markdown("The same image goes through several different models. We show the output the models agree on most, "
+                "with each model's answer and how closely it matches the others. Each image costs one call per model "
+                "(on a local server the models are loaded one after another, which is slow).")
+    task = gr.Radio(list(TASKS), value="Transcription", label="Task")
+    num = gr.Number(value=COMPARE_MIN, precision=0, label=f"Number of models to compare ({COMPARE_MIN}-{COMPARE_MAX})")
+    count_msg = gr.Markdown()
+    ids = list(MODELS)
+    picks = [gr.Dropdown([(model_label(m), m) for m in MODELS], value=ids[i % len(ids)], label=f"Model {i + 1}", visible=i < COMPARE_MIN)
+             for i in range(COMPARE_MAX)]
+    gr.on([num.blur, num.submit], on_compare_count, inputs=num, outputs=[num, count_msg, *picks])
+    with gr.Row(equal_height=True):
+        with gr.Column(scale=1, min_width=400):
+            image = camera()
+            button = gr.Button("Compare", variant="primary")
+        with gr.Column(scale=1, min_width=400):
+            output = gr.Textbox(label="Output (best agreement first, then every model)", lines=16)
+            gauge = gr.HTML()
+    image.upload(lambda im: im, inputs=image, outputs=image)
+    button.click(compare_single, inputs=[image, model, task, num, *picks], outputs=[output, gauge], show_progress="minimal")
+    upload = gr.UploadButton("Upload files (single or multiple)", file_types=["image"], file_count="multiple", elem_id=f"{key}-upload")
+    upload_status = gr.HTML(status_html(key))
+    results = gr.HTML()
+    upload.upload(lambda: status_html(key), outputs=upload_status) \
+          .then(compare_batch, inputs=[upload, model, task, num, *picks], outputs=results, concurrency_limit=None, trigger_mode="multiple")
+
 def thumb(img: Image.Image) -> str:
     """Browser-safe preview: downsized JPEG as a data URI (works for TIF too)."""
     im = img.copy()
@@ -303,9 +375,9 @@ GAUGE_MUTED = "#6b6a65"
 MULTIPASS_GAUGE = ("Pass 1 vs Pass 2", "Share of pass 1's words that pass 2 kept unchanged (100% minus words changed). "
                    "Higher = the review made fewer corrections.")
 
-def multisend_gauge_text(n: int) -> tuple[str, str]:
-    return (f"Agreement across {n} sends", f"How alike the {n} responses are, word by word, averaged over every pair. "
-            "Higher = the model gives the same answer each time.")
+def compare_gauge_text(n: int) -> tuple[str, str]:
+    return (f"Agreement across {n} models", "How alike the models' outputs are, word by word, averaged over every pair. "
+            "Higher = the models agree on what the image says.")
 
 def similarity_gauge(gauges: list[tuple[float, str, str]]) -> str:
     """Row of half-circle dials, one per (value_pct 0-100, label, explanation). The status word keeps the meaning from being colour-only."""
@@ -427,6 +499,8 @@ with gr.Blocks(title="Handwriting Transcription") as demo:
         build_section(model, temperature)
     with gr.Column():
         build_multipass_section(model, temperature)
+    with gr.Column():
+        build_compare_section(model)
     with gr.Accordion("Model Analysis Details"):
         with gr.Row():
             compare = gr.Dropdown(ANALYSIS_MODELS, value=[], multiselect=True, label="Compare models",
