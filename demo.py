@@ -13,7 +13,7 @@ import pandas as pd
 import requests
 import yaml
 from src.llm_transcription import TranscriptionError
-from src.transcribe_tools import format_output, single_send, multipass, multimodel
+from src.transcribe_tools import format_output, single_send, multipass, multisend, multimodel, config_prompt
 from PIL import Image
 
 parser = argparse.ArgumentParser()
@@ -98,14 +98,34 @@ def on_model_change(model_id):
         status = f"Couldn't load {model_id}. Make sure the model server is running, or contact the administrator. ({friendly(e)})"
     return status, MODELS[model_id]
 
-def run_one(img: Image.Image, model_id, temperature, config: str, as_json: bool, _num_send=0) -> tuple[str, bool, str]:
-    """One image, one send. Returns (text to show, ok, gauge html); no gauge for a single send."""
-    return (*format_output(single_send(img, model_id, temperature, config)["final_response"], as_json), "")
+def run_multisend(img: Image.Image, model_id, temperature, config: str, as_json: bool, num_send: int, prompt: str | None = None) -> tuple[str, bool, str]:
+    """num_send runs with an image through the model. Returns (text to show, ok, gauge html)."""
+    result = multisend(img, model_id, temperature, config, as_json, num_send, prompt)
+    distances = result["distances"]
+    similarities = [similarity for _, similarity in result["responses"]]
+
+    output_str = ""
+    for i, (text, _) in enumerate(result["responses"]):
+        output_str += f"---Run {i + 1}---\n {text} \n\n"
+
+    for i, total_score in enumerate(distances):
+        output_str += f"Metric {i + 1} (Total Word Edits for Run {i + 1}): {total_score:.2f}, Similarity: {similarities[i]:.2f}%\n"
+
+    output_str += f"!!! Best: {result['best_index'] + 1} \n\n"
+    output_str += f"!!! Average Similarity across all runs: {result['similarity']:.2f}%"
+    return output_str, result["ok"], similarity_gauge([(result["similarity"], *multisend_gauge_text(len(similarities)))])
+
+def run_one(img: Image.Image, model_id, temperature, config: str, as_json: bool, num_send=1, prompt: str | None = None) -> tuple[str, bool, str]:
+    """One image through the model. Returns (text to show, ok, gauge html); the gauge is empty for a single send."""
+    num_send = max(1, int(num_send or 1))
+    if num_send > 1:
+        return run_multisend(img, model_id, temperature, config, as_json, num_send, prompt)
+    return (*format_output(single_send(img, model_id, temperature, config, prompt)["final_response"], as_json), "")
 
 ## multipass "manual review": read once, then the same model checks its own output against the image ##
-def run_multipass(img: Image.Image, model_id, temperature, config: str, as_json: bool, num_send) -> tuple[str, bool, str]:
+def run_multipass(img: Image.Image, model_id, temperature, config: str, as_json: bool, num_send, prompt: str | None = None) -> tuple[str, bool, str]:
     """Batch view: both passes in one body. Same signature as run_one so the batch handler can use either."""
-    result = multipass(img, model_id, temperature, config, as_json)
+    result = multipass(img, model_id, temperature, config, as_json, prompt)
     return (f"Pass 2 changed {result['percent_changed']:.1%} of the text from pass 1.\n\n"
             f"--- Pass 2 (review, final output) ---\n{result['final_response']}\n\n--- Pass 1 (first read) ---\n{result['original_response']}"), result["ok"], similarity_gauge([(result["similarity"], *MULTIPASS_GAUGE)])
 
@@ -118,7 +138,7 @@ def render_job(job: dict) -> str:
     return progress_bar(job["done"], job["total"]) + "".join(job["items"]) + current
 
 def make_batch_handler(key: str, config: str, as_json: bool, runner=run_one):
-    def handler(img_files, model_id, temperature, num_send, request: gr.Request):
+    def handler(img_files, model_id, temperature, num_send, prompt, request: gr.Request):
         if not img_files:
             raise gr.Error("Upload an image first.")
         with JOBS_LOCK:
@@ -126,7 +146,7 @@ def make_batch_handler(key: str, config: str, as_json: bool, runner=run_one):
             already_running = job["running"]
             if not already_running:
                 job.update(running=True, pending=[], done=0, total=0, items=[], current=None)
-            job["pending"].extend(f.name for f in img_files)
+            job["pending"].extend((f.name, model_id, temperature, num_send, prompt) for f in img_files)    # settings are per file: later uploads keep their own
             job["total"] += len(img_files)
             view = render_job(job)
         yield view
@@ -140,7 +160,7 @@ def make_batch_handler(key: str, config: str, as_json: bool, runner=run_one):
                         job.update(running=False, current=None)
                         completed = True
                         break
-                    path = job["pending"].pop(0)
+                    path, f_model, f_temp, f_num, f_prompt = job["pending"].pop(0)
                     name = os.path.basename(path)
                     job["current"] = name
                     view = render_job(job)
@@ -150,12 +170,12 @@ def make_batch_handler(key: str, config: str, as_json: bool, runner=run_one):
                 try:
                     img = Image.open(path)
                     img_uri = thumb(img)
-                    body, ok, gauge = runner(img, model_id, temperature, config, as_json, num_send)
+                    body, ok, gauge = runner(img, f_model, f_temp, config, as_json, f_num, f_prompt)
                 except Exception as e:
                     print("Run failed:", e)
                     body, ok, gauge = friendly(e), False, ""
                 with JOBS_LOCK:
-                    job["items"].append(form_item(name, ok, body, img_uri, gauge))
+                    job["items"].append(form_item(name, ok, body, img_uri, gauge, bool(f_prompt)))
                     job["done"] += 1
                     job["current"] = None
                     view = render_job(job)
@@ -191,27 +211,59 @@ def camera() -> gr.Image:
                         constraints={"video": {"width": {"ideal": 1920}, "height": {"ideal": 1080}, "frameRate": {"ideal": 30}}}))
 
 TASKS = {"Transcription": (cfg["transcription_config"], False), "Form": (cfg["forms_config"], True)}    # task -> (config, as_json)
+MAX_PROMPT_CHARS = 4000
+CUSTOM_MARK = "(custom prompt)\n\n"
+
+def default_prompt(task: str) -> str:
+    """The prompt from the task's config yaml."""
+    return config_prompt(TASKS[task][0])
+
+def effective_prompt(enabled, text) -> str | None:
+    """The custom prompt if 'Adjust prompt' is on and the text isn't blank, else None (= the config prompt)."""
+    text = (text or "").strip() if enabled else ""
+    if len(text) > MAX_PROMPT_CHARS:
+        raise gr.Error(f"Custom prompt is too long (max {MAX_PROMPT_CHARS} characters).")
+    return text or None
+
+def toggle_prompt(enabled):
+    return gr.update(visible=bool(enabled)), gr.update(visible=bool(enabled))
+
+def task_prompt_controls() -> tuple[gr.Radio, gr.Checkbox, gr.Textbox]:
+    """Task radio + 'Adjust prompt' checkbox in one row, with the prompt box and reset button under it."""
+    with gr.Row():
+        task = gr.Radio(list(TASKS), value="Transcription", label="Task")
+        custom = gr.Checkbox(label="Adjust prompt", value=False, scale=0, min_width=160)
+    text = gr.Textbox(label="Prompt (used while 'Adjust prompt' is checked)", lines=10, visible=False, value=default_prompt("Transcription"))
+    reset = gr.Button("Reset to default", size="sm", visible=False)
+    custom.change(toggle_prompt, inputs=custom, outputs=[text, reset])
+    task.change(default_prompt, inputs=task, outputs=text)
+    reset.click(default_prompt, inputs=task, outputs=text)
+    return task, custom, text
+
 STANDARD_BATCH = {task: make_batch_handler(f"single-{task}", c, j) for task, (c, j) in TASKS.items()}
 
-def standard_single(img, model_id, temperature, task):
+def standard_single(img, model_id, temperature, task, custom, prompt_text, num_send):
     if img is None:
         raise gr.Error("Capture or upload an image first.")
     config, as_json = TASKS[task]
+    prompt = effective_prompt(custom, prompt_text)
+    num_send = max(1, int(num_send or 1))
     try:
-        text, _, gauge_html = run_one(img, model_id, temperature, config, as_json)
-        return text, gauge_html
+        text, _, gauge_html = run_one(img, model_id, temperature, config, as_json, num_send, prompt)
+        return (CUSTOM_MARK if prompt else "") + text, gauge_html
     except Exception as e:
         raise gr.Error(friendly(e))
 
-def standard_batch(img_files, model_id, temperature, task, request: gr.Request):
-    yield from STANDARD_BATCH[task](img_files, model_id, temperature, 0, request)
+def standard_batch(img_files, model_id, temperature, task, custom, prompt_text, num_send, request: gr.Request):
+    num_send = max(1, int(num_send or 1))
+    yield from STANDARD_BATCH[task](img_files, model_id, temperature, num_send, effective_prompt(custom, prompt_text), request)
 
 def build_section(model, temperature):
     key = "single"
     gr.Markdown("# Vision LLM Handwriting & Form Transcription Demo")
     gr.Markdown("Pick a task, then capture a photo or upload one or more images. "
                 "Transcription returns plain text; Form returns JSON with handwritten and typed sections.")
-    task = gr.Radio(list(TASKS), value="Transcription", label="Task")
+    task, custom, prompt_text = task_prompt_controls()
     with gr.Row(equal_height=True):
         with gr.Column(scale=1, min_width=400):
             image = camera()
@@ -220,37 +272,41 @@ def build_section(model, temperature):
             output = gr.Textbox(label="Output (text or form JSON)", lines=16)
             gauge = gr.HTML()
     image.upload(lambda im: im, inputs=image, outputs=image)
-    button.click(standard_single, inputs=[image, model, temperature, task], outputs=[output, gauge], show_progress="minimal")
+    with gr.Column():
+        num_send = gr.Number(value=1, precision=0, minimum=1, label="Number of attempts with model")
+    button.click(standard_single, inputs=[image, model, temperature, task, custom, prompt_text, num_send], outputs=[output, gauge], show_progress="minimal")
     upload = gr.UploadButton("Upload files (single or multiple)", file_types=["image"], file_count="multiple", elem_id=f"{key}-upload")
     upload_status = gr.HTML(status_html(key))
     results = gr.HTML()
     upload.upload(lambda: status_html(key), outputs=upload_status) \
-          .then(standard_batch, inputs=[upload, model, temperature, task], outputs=results, concurrency_limit=None, trigger_mode="multiple")
+          .then(standard_batch, inputs=[upload, model, temperature, task, custom, prompt_text, num_send], outputs=results, concurrency_limit=None, trigger_mode="multiple")
 
 MULTIPASS_BATCH = {task: make_batch_handler(f"multipass-{task}", c, j, run_multipass) for task, (c, j) in TASKS.items()}
 
-def multipass_single(img, model_id, temperature, task):
+def multipass_single(img, model_id, temperature, task, custom, prompt_text):
     if img is None:
         raise gr.Error("Capture or upload an image first.")
     config, as_json = TASKS[task]
+    prompt = effective_prompt(custom, prompt_text)
     try:
-        result = multipass(img, model_id, temperature, config, as_json)
+        result = multipass(img, model_id, temperature, config, as_json, prompt)
     except Exception as e:
         raise gr.Error(friendly(e))
     first, second, changed = result["original_response"], result["final_response"], result["percent_changed"]
     note = (f"**Pass 2 changed {changed:.1%} of the text from pass 1.** Pass 2 is the output we would show the user. "
             "A change near 0% means the review mostly agreed with the first read (watch for confirmation bias).")
-    return first, second, note, similarity_gauge([(result["similarity"], *MULTIPASS_GAUGE)])
+    mark = CUSTOM_MARK if prompt else ""
+    return first, mark + second, mark + note, similarity_gauge([(result["similarity"], *MULTIPASS_GAUGE)])
 
-def multipass_batch(img_files, model_id, temperature, task, request: gr.Request):
-    yield from MULTIPASS_BATCH[task](img_files, model_id, temperature, 0, request)
+def multipass_batch(img_files, model_id, temperature, task, custom, prompt_text, request: gr.Request):
+    yield from MULTIPASS_BATCH[task](img_files, model_id, temperature, 0, effective_prompt(custom, prompt_text), request)
 
 def build_multipass_section(model, temperature):
     key = "multipass"
     gr.Markdown("# Multipass Review Demo (manual review)")
     gr.Markdown("The model reads the image once (pass 1), then checks its own output against the image and returns a corrected "
                 "final version (pass 2). Each image costs two model calls.")
-    task = gr.Radio(list(TASKS), value="Transcription", label="Task")
+    task, custom, prompt_text = task_prompt_controls()
     with gr.Row(equal_height=True):
         with gr.Column(scale=1, min_width=400):
             image = camera()
@@ -261,12 +317,12 @@ def build_multipass_section(model, temperature):
             change = gr.Markdown()
             gauge = gr.HTML()
     image.upload(lambda im: im, inputs=image, outputs=image)
-    button.click(multipass_single, inputs=[image, model, temperature, task], outputs=[first, second, change, gauge], show_progress="minimal")
+    button.click(multipass_single, inputs=[image, model, temperature, task, custom, prompt_text], outputs=[first, second, change, gauge], show_progress="minimal")
     upload = gr.UploadButton("Upload files (single or multiple)", file_types=["image"], file_count="multiple", elem_id=f"{key}-upload")
     upload_status = gr.HTML(status_html(key))
     results = gr.HTML()
     upload.upload(lambda: status_html(key), outputs=upload_status) \
-          .then(multipass_batch, inputs=[upload, model, temperature, task], outputs=results, concurrency_limit=None, trigger_mode="multiple")
+          .then(multipass_batch, inputs=[upload, model, temperature, task, custom, prompt_text], outputs=results, concurrency_limit=None, trigger_mode="multiple")
 
 ## compare models: the same image through N different models, scored for agreement ##
 COMPARE_MIN, COMPARE_MAX = 2, 5
@@ -275,9 +331,9 @@ def compare_prepare():
     """Local LM Studio holds one model at a time, so load each model just before its send. Hosted APIs need nothing."""
     return load_model if USE_LMSTUDIO else None
 
-def run_compare(img: Image.Image, models, _temperature, config: str, as_json: bool, _num_send) -> tuple[str, bool, str]:
+def run_compare(img: Image.Image, models, _temperature, config: str, as_json: bool, _num_send, prompt: str | None = None) -> tuple[str, bool, str]:
     """models is a list of (model_id, temperature). Same signature as run_one so the batch handler can use it."""
-    result = multimodel(img, models, config, as_json, compare_prepare())
+    result = multimodel(img, models, config, as_json, compare_prepare(), prompt)
     parts = [f"Best agreement: {result['best_model']} (we would show this output)", ""]
     for model_id, text, sim in result["responses"]:
         parts += [f"--- {model_id} (similarity {sim:.2f}%) ---", text, ""]
@@ -301,24 +357,26 @@ def reload_top_model(model_id) -> None:
         except Exception as e:
             log.error("Reloading %s after compare failed: %r", model_id, e)
 
-def compare_single(img, top_model, task, n, m1, m2, m3, m4, m5):
+def compare_single(img, top_model, task, custom, prompt_text, n, m1, m2, m3, m4, m5):
     if img is None:
         raise gr.Error("Capture or upload an image first.")
     config, as_json = TASKS[task]
     models = compare_models(n, [m1, m2, m3, m4, m5])
+    prompt = effective_prompt(custom, prompt_text)
     try:
-        text, _, gauge_html = run_compare(img, models, None, config, as_json, 0)
-        return text, gauge_html
+        text, _, gauge_html = run_compare(img, models, None, config, as_json, 0, prompt)
+        return (CUSTOM_MARK if prompt else "") + text, gauge_html
     except Exception as e:
         raise gr.Error(friendly(e))
     finally:
         reload_top_model(top_model)
 
-def compare_batch(img_files, top_model, task, n, m1, m2, m3, m4, m5, request: gr.Request):
+def compare_batch(img_files, top_model, task, custom, prompt_text, n, m1, m2, m3, m4, m5, request: gr.Request):
     models = compare_models(n, [m1, m2, m3, m4, m5])
+    prompt = effective_prompt(custom, prompt_text)
     busy = JOBS.get((request.session_hash, f"compare-{task}"), {}).get("running")    # a running worker takes new files; don't pull its models away
     try:
-        yield from COMPARE_BATCH[task](img_files, models, None, n, request)
+        yield from COMPARE_BATCH[task](img_files, models, None, n, prompt, request)
     finally:
         if img_files and not busy:
             reload_top_model(top_model)
@@ -339,7 +397,7 @@ def build_compare_section(model):
     gr.Markdown("The same image goes through several different models. We show the output the models agree on most, "
                 "with each model's answer and how closely it matches the others. Each image costs one call per model "
                 "(on a local server the models are loaded one after another, which is slow).")
-    task = gr.Radio(list(TASKS), value="Transcription", label="Task")
+    task, custom, prompt_text = task_prompt_controls()
     num = gr.Number(value=COMPARE_MIN, precision=0, label=f"Number of models to compare ({COMPARE_MIN}-{COMPARE_MAX})")
     count_msg = gr.Markdown()
     ids = list(MODELS)
@@ -354,12 +412,12 @@ def build_compare_section(model):
             output = gr.Textbox(label="Output (best agreement first, then every model)", lines=16)
             gauge = gr.HTML()
     image.upload(lambda im: im, inputs=image, outputs=image)
-    button.click(compare_single, inputs=[image, model, task, num, *picks], outputs=[output, gauge], show_progress="minimal")
+    button.click(compare_single, inputs=[image, model, task, custom, prompt_text, num, *picks], outputs=[output, gauge], show_progress="minimal")
     upload = gr.UploadButton("Upload files (single or multiple)", file_types=["image"], file_count="multiple", elem_id=f"{key}-upload")
     upload_status = gr.HTML(status_html(key))
     results = gr.HTML()
     upload.upload(lambda: status_html(key), outputs=upload_status) \
-          .then(compare_batch, inputs=[upload, model, task, num, *picks], outputs=results, concurrency_limit=None, trigger_mode="multiple")
+          .then(compare_batch, inputs=[upload, model, task, custom, prompt_text, num, *picks], outputs=results, concurrency_limit=None, trigger_mode="multiple")
 
 def thumb(img: Image.Image) -> str:
     """Browser-safe preview: downsized JPEG as a data URI (works for TIF too)."""
@@ -374,6 +432,10 @@ GAUGE_TRACK = "#e6e5e0"
 GAUGE_MUTED = "#6b6a65"
 MULTIPASS_GAUGE = ("Pass 1 vs Pass 2", "Share of pass 1's words that pass 2 kept unchanged (100% minus words changed). "
                    "Higher = the review made fewer corrections.")
+
+def multisend_gauge_text(n: int) -> tuple[str, str]:
+    return (f"Agreement across {n} sends", f"How alike the {n} responses are, word by word, averaged over every pair. "
+            "Higher = the model gives the same answer each time.")
 
 def compare_gauge_text(n: int) -> tuple[str, str]:
     return (f"Agreement across {n} models", "How alike the models' outputs are, word by word, averaged over every pair. "
@@ -397,13 +459,13 @@ def similarity_gauge(gauges: list[tuple[float, str, str]]) -> str:
                      f'<div style="font-size:11px;line-height:1.35;color:{GAUGE_MUTED};margin-top:2px">{html.escape(explanation)}</div></div>')
     return f'<div style="display:flex;flex-wrap:wrap;gap:12px;margin:4px 0 8px">{"".join(dials)}</div>' if dials else ""
 
-def form_item(name: str, ok: bool, body: str, img_uri: str | None = None, gauge_html: str = "") -> str:
+def form_item(name: str, ok: bool, body: str, img_uri: str | None = None, gauge_html: str = "", custom: bool = False) -> str:
     color = "#0ca30c" if ok else "#d03b3b"
     icon = "✓" if ok else "✗"
     img_tag = (f'<div style="flex:1 1 320px;min-width:0">'
                f'<img src="{img_uri}" style="max-width:100%;display:block"></div>') if img_uri else ""
     return (f'<details style="border-left:4px solid {color};padding:6px 10px;margin:6px 0">'
-            f'<summary style="cursor:pointer;color:{color};font-weight:600">{icon} {html.escape(name)}</summary>'
+            f'<summary style="cursor:pointer;color:{color};font-weight:600">{icon} {html.escape(name)}{" · custom prompt" if custom else ""}</summary>'
             f'<div style="display:flex;flex-wrap:wrap;gap:12px;margin-top:8px;align-items:flex-start">'
             f'{img_tag}'
             f'<div style="flex:1 1 320px;min-width:0">{gauge_html}'
