@@ -13,7 +13,7 @@ import pandas as pd
 import requests
 import yaml
 from src.llm_transcription import TranscriptionError
-from src.transcribe_tools import format_output, single_send, multipass, multimodel, config_prompt
+from src.transcribe_tools import format_output, single_send, multipass, multisend, multimodel, config_prompt
 from PIL import Image
 
 parser = argparse.ArgumentParser()
@@ -98,8 +98,28 @@ def on_model_change(model_id):
         status = f"Couldn't load {model_id}. Make sure the model server is running, or contact the administrator. ({friendly(e)})"
     return status, MODELS[model_id]
 
-def run_one(img: Image.Image, model_id, temperature, config: str, as_json: bool, _num_send=0, prompt: str | None = None) -> tuple[str, bool, str]:
-    """One image, one send. Returns (text to show, ok, gauge html); no gauge for a single send."""
+def run_multisend(img: Image.Image, model_id, temperature, config: str, as_json: bool, num_send: int, prompt: str | None = None) -> tuple[str, bool, str]:
+    """num_send runs with an image through the model. Returns (text to show, ok, gauge html)."""
+    result = multisend(img, model_id, temperature, config, as_json, num_send, prompt)
+    distances = result["distances"]
+    similarities = [similarity for _, similarity in result["responses"]]
+
+    output_str = ""
+    for i, (text, _) in enumerate(result["responses"]):
+        output_str += f"---Run {i + 1}---\n {text} \n\n"
+
+    for i, total_score in enumerate(distances):
+        output_str += f"Metric {i + 1} (Total Word Edits for Run {i + 1}): {total_score:.2f}, Similarity: {similarities[i]:.2f}%\n"
+
+    output_str += f"!!! Best: {result['best_index'] + 1} \n\n"
+    output_str += f"!!! Average Similarity across all runs: {result['similarity']:.2f}%"
+    return output_str, result["ok"], similarity_gauge([(result["similarity"], *multisend_gauge_text(len(similarities)))])
+
+def run_one(img: Image.Image, model_id, temperature, config: str, as_json: bool, num_send=1, prompt: str | None = None) -> tuple[str, bool, str]:
+    """One image through the model. Returns (text to show, ok, gauge html); the gauge is empty for a single send."""
+    num_send = max(1, int(num_send or 1))
+    if num_send > 1:
+        return run_multisend(img, model_id, temperature, config, as_json, num_send, prompt)
     return (*format_output(single_send(img, model_id, temperature, config, prompt)["final_response"], as_json), "")
 
 ## multipass "manual review": read once, then the same model checks its own output against the image ##
@@ -222,19 +242,21 @@ def task_prompt_controls() -> tuple[gr.Radio, gr.Checkbox, gr.Textbox]:
 
 STANDARD_BATCH = {task: make_batch_handler(f"single-{task}", c, j) for task, (c, j) in TASKS.items()}
 
-def standard_single(img, model_id, temperature, task, custom, prompt_text):
+def standard_single(img, model_id, temperature, task, custom, prompt_text, num_send):
     if img is None:
         raise gr.Error("Capture or upload an image first.")
     config, as_json = TASKS[task]
     prompt = effective_prompt(custom, prompt_text)
+    num_send = max(1, int(num_send or 1))
     try:
-        text, _, gauge_html = run_one(img, model_id, temperature, config, as_json, 0, prompt)
+        text, _, gauge_html = run_one(img, model_id, temperature, config, as_json, num_send, prompt)
         return (CUSTOM_MARK if prompt else "") + text, gauge_html
     except Exception as e:
         raise gr.Error(friendly(e))
 
-def standard_batch(img_files, model_id, temperature, task, custom, prompt_text, request: gr.Request):
-    yield from STANDARD_BATCH[task](img_files, model_id, temperature, 0, effective_prompt(custom, prompt_text), request)
+def standard_batch(img_files, model_id, temperature, task, custom, prompt_text, num_send, request: gr.Request):
+    num_send = max(1, int(num_send or 1))
+    yield from STANDARD_BATCH[task](img_files, model_id, temperature, num_send, effective_prompt(custom, prompt_text), request)
 
 def build_section(model, temperature):
     key = "single"
@@ -250,12 +272,14 @@ def build_section(model, temperature):
             output = gr.Textbox(label="Output (text or form JSON)", lines=16)
             gauge = gr.HTML()
     image.upload(lambda im: im, inputs=image, outputs=image)
-    button.click(standard_single, inputs=[image, model, temperature, task, custom, prompt_text], outputs=[output, gauge], show_progress="minimal")
+    with gr.Column():
+        num_send = gr.Number(value=1, precision=0, minimum=1, label="Number of attempts with model")
+    button.click(standard_single, inputs=[image, model, temperature, task, custom, prompt_text, num_send], outputs=[output, gauge], show_progress="minimal")
     upload = gr.UploadButton("Upload files (single or multiple)", file_types=["image"], file_count="multiple", elem_id=f"{key}-upload")
     upload_status = gr.HTML(status_html(key))
     results = gr.HTML()
     upload.upload(lambda: status_html(key), outputs=upload_status) \
-          .then(standard_batch, inputs=[upload, model, temperature, task, custom, prompt_text], outputs=results, concurrency_limit=None, trigger_mode="multiple")
+          .then(standard_batch, inputs=[upload, model, temperature, task, custom, prompt_text, num_send], outputs=results, concurrency_limit=None, trigger_mode="multiple")
 
 MULTIPASS_BATCH = {task: make_batch_handler(f"multipass-{task}", c, j, run_multipass) for task, (c, j) in TASKS.items()}
 
@@ -408,6 +432,10 @@ GAUGE_TRACK = "#e6e5e0"
 GAUGE_MUTED = "#6b6a65"
 MULTIPASS_GAUGE = ("Pass 1 vs Pass 2", "Share of pass 1's words that pass 2 kept unchanged (100% minus words changed). "
                    "Higher = the review made fewer corrections.")
+
+def multisend_gauge_text(n: int) -> tuple[str, str]:
+    return (f"Agreement across {n} sends", f"How alike the {n} responses are, word by word, averaged over every pair. "
+            "Higher = the model gives the same answer each time.")
 
 def compare_gauge_text(n: int) -> tuple[str, str]:
     return (f"Agreement across {n} models", "How alike the models' outputs are, word by word, averaged over every pair. "
